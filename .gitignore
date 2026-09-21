@@ -1,0 +1,5 @@
+build/
+*.img
+*.bin
+*.elf
+*.o
