@@ -293,7 +293,3 @@ Lumen is run exclusively as a QEMU virtual machine on Ubuntu. It has not been te
 hardware, and it does not write to any physical disk.
 
 ---
-
-## License
-
-Released under the MIT License. A `LICENSE` file has not yet been added to the repository.
