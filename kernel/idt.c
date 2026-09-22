@@ -10,6 +10,7 @@ static struct idt_ptr idtp;
 extern void idt_load(struct idt_ptr *idtp);
 extern void isr0(void);
 extern void isr3(void);
+extern void irq0(void);
 
 static void idt_set_gate(
     int number,
@@ -31,6 +32,7 @@ void idt_init(void)
         idt_set_gate(i, 0, 0, 0);
     }
 
+    /* CPU exceptions */
     idt_set_gate(
         0,
         (uint32_t)isr0,
@@ -41,6 +43,14 @@ void idt_init(void)
     idt_set_gate(
         3,
         (uint32_t)isr3,
+        KERNEL_CODE_SEGMENT,
+        IDT_INTERRUPT_GATE
+    );
+
+    /* Hardware timer IRQ0 -> vector 32 */
+    idt_set_gate(
+        32,
+        (uint32_t)irq0,
         KERNEL_CODE_SEGMENT,
         IDT_INTERRUPT_GATE
     );

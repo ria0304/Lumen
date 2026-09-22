@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include "idt.h"
+#include "pic.h"
+#include "pit.h"
 
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
@@ -8,6 +10,7 @@
 
 static int terminal_row = 0;
 static int terminal_column = 0;
+static volatile uint32_t timer_ticks = 0;
 
 static volatile unsigned short *vga =
     (volatile unsigned short *)VGA_MEMORY;
@@ -79,6 +82,33 @@ void exception_handler(uint32_t vector)
     }
 }
 
+void timer_handler(void)
+{
+    timer_ticks++;
+
+    /*
+     * Display the low 16 bits of the timer tick count
+     * in hexadecimal at the top-right of the screen.
+     */
+    volatile unsigned short *timer_display =
+        (volatile unsigned short *)VGA_MEMORY;
+
+    const char hex[] = "0123456789ABCDEF";
+    uint32_t value = timer_ticks;
+
+    for (int i = 0; i < 8; i++) {
+        uint8_t digit = value & 0xF;
+        timer_display[79 - i] =
+            ((unsigned short)VGA_COLOR << 8) | hex[digit];
+        value >>= 4;
+    }
+
+    /*
+     * Send End Of Interrupt to the master PIC.
+     */
+    pic_send_eoi(0);
+}
+
 void kmain(void)
 {
     terminal_clear();
@@ -88,13 +118,17 @@ void kmain(void)
     terminal_write("Protected mode: 32-bit\n");
 
     idt_init();
-
     terminal_write("IDT initialized: OK\n");
-    terminal_write("Triggering breakpoint exception...\n");
 
-    __asm__ volatile ("int $3");
+    pic_init();
+    terminal_write("PIC initialized: OK\n");
 
-    terminal_write("ERROR: exception was not handled\n");
+    pit_init(100);
+    terminal_write("PIT initialized: 100 Hz\n");
+
+    terminal_write("Enabling timer interrupts...\n");
+
+    __asm__ volatile ("sti");
 
     for (;;) {
         __asm__ volatile ("hlt");

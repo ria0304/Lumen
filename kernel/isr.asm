@@ -3,8 +3,10 @@ BITS 32
 global idt_load
 global isr0
 global isr3
+global irq0
 
 extern exception_handler
+extern timer_handler
 
 idt_load:
     mov eax, [esp + 4]
@@ -24,5 +26,11 @@ isr3:
     push dword 3
     call exception_handler
     add esp, 4
+    popa
+    iret
+
+irq0:
+    pusha
+    call timer_handler
     popa
     iret
