@@ -90,6 +90,27 @@ void timer_handler(void)
      * Display the low 16 bits of the timer tick count
      * in hexadecimal at the top-right of the screen.
      */
+
+    if (timer_ticks % 100 == 0) {
+        volatile unsigned short *seconds_display =
+            (volatile unsigned short *)VGA_MEMORY;
+
+        const char text[] = "SEC:";
+        for (int i = 0; i < 4; i++) {
+            seconds_display[80 + 70 + i] =
+                ((unsigned short)VGA_COLOR << 8) | text[i];
+        }
+
+        uint32_t seconds = timer_ticks / 100;
+        const char hex[] = "0123456789ABCDEF";
+
+        for (int i = 0; i < 4; i++) {
+            uint8_t digit = seconds & 0xF;
+            seconds_display[80 + 78 - i] =
+                ((unsigned short)VGA_COLOR << 8) | hex[digit];
+            seconds >>= 4;
+        }
+    }
     volatile unsigned short *timer_display =
         (volatile unsigned short *)VGA_MEMORY;
 
