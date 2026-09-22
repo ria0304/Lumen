@@ -1,3 +1,6 @@
+#include <stdint.h>
+#include "idt.h"
+
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
 #define VGA_MEMORY 0xB8000
@@ -56,6 +59,26 @@ static void terminal_write(const char *message)
     }
 }
 
+void exception_handler(uint32_t vector)
+{
+    terminal_write("\nEXCEPTION RECEIVED\n");
+
+    if (vector == 0) {
+        terminal_write("Exception: Divide by zero\n");
+    } else if (vector == 3) {
+        terminal_write("Exception: Breakpoint\n");
+    } else {
+        terminal_write("Exception: Unknown\n");
+    }
+
+    terminal_write("IDT: WORKING\n");
+
+    for (;;) {
+        __asm__ volatile ("cli");
+        __asm__ volatile ("hlt");
+    }
+}
+
 void kmain(void)
 {
     terminal_clear();
@@ -63,7 +86,15 @@ void kmain(void)
     terminal_write("Lumer kernel online!\n");
     terminal_write("VGA text driver: OK\n");
     terminal_write("Protected mode: 32-bit\n");
-    terminal_write("Day 4 milestone: COMPLETE\n");
+
+    idt_init();
+
+    terminal_write("IDT initialized: OK\n");
+    terminal_write("Triggering breakpoint exception...\n");
+
+    __asm__ volatile ("int $3");
+
+    terminal_write("ERROR: exception was not handled\n");
 
     for (;;) {
         __asm__ volatile ("hlt");
