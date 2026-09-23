@@ -11,8 +11,8 @@
 **A 32-bit x86 operating system, built from a raw boot sector up.**
 
 Lumen is written in C and assembly, with a custom BIOS boot sector and a freestanding C kernel.
-It is developed and tested exclusively under QEMU. Interrupt handling, memory management, a
-filesystem, multitasking, and a shell are planned but not yet implemented.
+It is developed and tested exclusively under QEMU. A physical memory allocator, filesystem,
+multitasking, and a shell are planned but not yet implemented.
 
 </div>
 
@@ -20,9 +20,9 @@ filesystem, multitasking, and a shell are planned but not yet implemented.
 
 ## Status
 
-**Early development.** The system boots from a raw disk image, enters protected mode, and
-transfers control to a C kernel that writes to the VGA text buffer. Nothing beyond that is
-implemented yet — see [Current State](#current-state) for the honest breakdown.
+**Early development.** The system boots from a raw disk image, enters protected mode, transfers
+control to a C kernel, and now has a working interrupt pipeline: CPU exceptions, a remapped PIC,
+and a PIT timer driving IRQ0. See [Current State](#current-state) for the honest breakdown.
 
 ---
 
@@ -50,10 +50,10 @@ implemented yet — see [Current State](#current-state) for the honest breakdown
 | Kernel entry point | Implemented | Assembly stub sets the stack and calls `kmain()` |
 | GDT | Implemented | Flat code and data segments, defined in the boot sector |
 | VGA text output | Partial | Direct writes in `kmain()`; no `putc`, cursor, or scrolling |
-| IDT and exception handlers | Partial | `idt_init()` (`kernel/idt.c`) populates gates for vector 0 (divide-by-zero) and vector 3 (breakpoint) only; the other 254 entries are left null. `kmain()` self-tests by executing `int $3` right after `idt_init()` runs. Any exception outside those two vectors currently triple-faults |
-| PIC remapping and hardware interrupts | Not started | |
-| PIT timer | Not started | |
-| Keyboard driver | Not started | |
+| IDT and exception handlers | Partial | `idt_init()` (`kernel/idt.c`) populates gates for vector 0 (divide-by-zero), vector 3 (breakpoint), and vector 32 (IRQ0/timer). The remaining 253 entries are left null. `kmain()` self-tests by executing `int $3` right after `idt_init()` runs |
+| PIC remapping | Implemented | `pic_init()` (`kernel/pic.c`) remaps IRQ 0-7 to vectors 32-39 and IRQ 8-15 to 40-47, preserving the existing interrupt masks. `pic_send_eoi()` is called from the timer handler |
+| PIT timer | Implemented | `pit_init()` (`kernel/pit.c`) programs channel 0 for a configurable frequency; `kmain()` calls it at 100 Hz. `timer_handler()` in `kernel.c` increments a tick counter and renders the low 16 bits as hex in the top-right of the screen on every tick |
+| Keyboard driver | Not started | IRQ1 has no handler; the PIC mask for it is whatever the BIOS left, and `idt[33]` is null |
 | Physical memory allocator | Not started | Bump allocator planned first |
 | Filesystem | Not started | |
 | Processes and multitasking | Not started | |
@@ -65,15 +65,19 @@ implemented yet — see [Current State](#current-state) for the honest breakdown
 ## Boot Sequence
 
 1. The BIOS loads the 512-byte boot sector (`boot/boot.asm`) to `0x7C00`.
-2. The boot sector reads one sector containing the kernel to physical address `0x10000`.
+2. The boot sector reads 8 sectors (4 KiB) containing the kernel to physical address `0x10000`
+   via CHS `int 0x13`. This is a fixed read count, not a measurement of the current kernel's
+   size — see [Known Limitations](#known-limitations).
 3. It enables the A20 line using the fast method (port `0x92`), loads the GDT, and sets the PE bit
    in `CR0`.
 4. A far jump into the 32-bit code segment flushes the prefetch queue. Segment registers are loaded
    with the data selector and the stack pointer is set to `0x90000`.
 5. Control passes to `0x10000`, where `kernel/entry.asm` calls `kmain()` in `kernel/kernel.c`.
-6. `kmain()` clears the VGA buffer, prints status lines, then calls `idt_init()` to install gates
-   for vectors 0 and 3 and load the IDT with `lidt`. It then executes `int $3` to trigger the
-   breakpoint handler as a self-test; `exception_handler()` prints a confirmation and halts.
+6. `kmain()` clears the VGA buffer, prints status lines, then calls `idt_init()`, `pic_init()`, and
+   `pit_init(100)` in sequence, printing a status line after each. It executes `int $3` to trigger
+   the breakpoint handler as a self-test — `exception_handler()` prints a confirmation and halts —
+   before interrupts are enabled. Assuming that self-test passes, `sti` is executed and the kernel
+   idles in a `hlt` loop, from which IRQ0 ticks are serviced.
 
 During the real-mode phase the boot sector prints status markers through BIOS teletype output:
 `READ_OK`, `A20_OK`, `GDT_OK`, and `PM_START`. A failed disk read prints `DISK_ERROR` and halts.
@@ -84,12 +88,12 @@ as a protected-mode sanity check.
 
 ## Architecture
 
-> Boot Foundation, Kernel Runtime, and Interrupt Handling are all real, shipped code —
-> `kernel/idt.c` and `kernel/isr.asm` exist and are exercised at boot via the deliberate
-> `int $3` self-test in `kmain()`. But Interrupt Handling here means exactly two IDT entries
-> (divide-by-zero and breakpoint); there's no PIC remap, no PIT, no keyboard driver, and every
-> other vector is an unhandled fault. Planned Subsystems is the honest label for everything that
-> group represents — none of it exists yet.
+> Boot Foundation, Kernel Runtime, and Interrupt Handling are all real, shipped code. Interrupt
+> Handling now covers three populated IDT vectors — divide-by-zero, breakpoint, and the PIC-remapped
+> hardware timer on IRQ0 — plus a working PIC remap and PIT. It does not cover IRQ1 (keyboard) or
+> any other hardware interrupt; those vectors, and vectors 4 through 31 besides 0 and 3, are still
+> null and will triple-fault the machine if raised. Planned Subsystems is the honest label for
+> everything that group represents — none of it exists yet.
 
 ```mermaid
 flowchart TD
@@ -110,10 +114,13 @@ subgraph group_interrupts["Interrupt Handling"]
   node_idt["IDT Setup<br/>[idt.c]"]
   node_isr_stubs["ISR Stubs<br/>[isr.asm]"]
   node_exception_handler["Exception Handler<br/>[kernel.c]"]
+  node_pic["PIC Remap<br/>[pic.c]"]
+  node_pit["PIT Timer<br/>[pit.c]"]
+  node_timer_handler["Timer Handler<br/>[kernel.c]"]
 end
 
 subgraph group_roadmap["Planned Subsystems"]
-  node_input_interrupts["Input Interrupts"]
+  node_keyboard["Keyboard Driver"]
   node_memory_management["Memory Management"]
   node_filesystem[("Filesystem Storage")]
   node_multitasking["Process Multitasking"]
@@ -131,8 +138,13 @@ node_kernel_main -->|"writes text"| node_vga_terminal
 node_kernel_main -->|"initializes IDT"| node_idt
 node_kernel_main -->|"raises breakpoint"| node_breakpoint
 node_breakpoint -->|"raises vector"| node_idt
+node_kernel_main -->|"remaps PIC"| node_pic
+node_kernel_main -->|"programs channel 0"| node_pit
 node_idt -->|"dispatches vector"| node_isr_stubs
 node_isr_stubs -->|"calls handler"| node_exception_handler
+node_isr_stubs -->|"calls handler"| node_timer_handler
+node_pit -->|"drives IRQ0"| node_timer_handler
+node_timer_handler -->|"sends EOI"| node_pic
 
 click node_boot_sector "https://github.com/ria0304/lumen/blob/main/boot/boot.asm"
 click node_protected_mode "https://github.com/ria0304/lumen/blob/main/boot/boot.asm"
@@ -143,7 +155,10 @@ click node_breakpoint "https://github.com/ria0304/lumen/blob/main/kernel/kernel.
 click node_idt "https://github.com/ria0304/lumen/blob/main/kernel/idt.c"
 click node_isr_stubs "https://github.com/ria0304/lumen/blob/main/kernel/isr.asm"
 click node_exception_handler "https://github.com/ria0304/lumen/blob/main/kernel/kernel.c"
-click node_input_interrupts "https://github.com/ria0304/lumen/tree/main/kernel"
+click node_pic "https://github.com/ria0304/lumen/blob/main/kernel/pic.c"
+click node_pit "https://github.com/ria0304/lumen/blob/main/kernel/pit.c"
+click node_timer_handler "https://github.com/ria0304/lumen/blob/main/kernel/kernel.c"
+click node_keyboard "https://github.com/ria0304/lumen/tree/main/kernel"
 click node_memory_management "https://github.com/ria0304/lumen/tree/main/kernel"
 click node_filesystem "https://github.com/ria0304/lumen/tree/main/kernel"
 click node_multitasking "https://github.com/ria0304/lumen/tree/main/kernel"
@@ -159,8 +174,8 @@ classDef toneIndigo fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81
 classDef toneTeal fill:#ccfbf1,stroke:#0f766e,stroke-width:1.5px,color:#134e4a
 class node_boot_sector,node_protected_mode toneBlue
 class node_kernel_entry,node_kernel_main,node_vga_terminal,node_breakpoint toneAmber
-class node_idt,node_isr_stubs,node_exception_handler toneMint
-class node_input_interrupts,node_memory_management,node_filesystem,node_multitasking,node_shell_userland,node_graphics toneRose
+class node_idt,node_isr_stubs,node_exception_handler,node_pic,node_pit,node_timer_handler toneMint
+class node_keyboard,node_memory_management,node_filesystem,node_multitasking,node_shell_userland,node_graphics toneRose
 class node_bios toneIndigo
 ```
 
@@ -188,23 +203,32 @@ class node_bios toneIndigo
   real hardware, where the keyboard-controller method may be required.
 - **Linked at `0x10000`.** `linker.ld` places `.text`, `.rodata`, `.data`, and `.bss` contiguously
   from the load address so the boot sector can jump directly to the start of the image.
+- **PIC masks preserved, not cleared, on remap.** `pic_init()` reads the existing interrupt masks
+  before remapping and restores them afterward rather than unmasking everything. IRQ0 is unmasked
+  by the BIOS default, which is why the timer fires without an explicit `pic_unmask` call; IRQ1
+  (keyboard) is not separately unmasked yet.
 
 ---
 
 ## Known Limitations
 
-- **Single-sector kernel load.** `boot.asm` reads exactly one sector (512 bytes). The kernel fails
-  to load correctly once it exceeds that size, so the read count must be increased, and eventually
-  multi-track reads handled, as the kernel grows.
+- **Fixed 8-sector kernel load.** `boot.asm` reads exactly 8 sectors (4 KiB) via CHS `int 0x13`,
+  regardless of the kernel's actual size. The kernel currently fits well within that, but the read
+  count is not derived from the build output — it will silently stop loading the full kernel once
+  the linked image exceeds 4 KiB, with no error raised at boot time.
 - **BIOS CHS disk access.** Adequate under QEMU, but not a viable long-term approach for larger
   images or real hardware.
 - **Boot-sector GDT.** The GDT lives in the boot sector's address range and is not owned by the
   kernel. It should be re-established in kernel code once the kernel has its own memory layout.
 - **No `.bss` initialization.** The kernel entry stub does not zero `.bss`. This has no effect yet
   because the kernel has no uninitialized globals.
-- **Only two IDT vectors are populated.** `idt_init()` sets gates for vector 0 and vector 3 and
-  leaves the remaining 254 entries null. Any other exception (e.g. a general protection fault or
-  page fault, once paging exists) has no handler installed and will triple-fault the machine.
+- **Only three IDT vectors are populated.** `idt_init()` sets gates for vector 0, vector 3, and
+  vector 32 (IRQ0) and leaves the remaining 253 entries null. Any other exception (e.g. a general
+  protection fault or page fault, once paging exists) or hardware interrupt (e.g. IRQ1/keyboard)
+  has no handler installed and will triple-fault the machine.
+- **No spurious-IRQ handling.** `pic_send_eoi()` sends EOI unconditionally based on the IRQ number
+  passed in; it does not check the PIC's in-service register, so a spurious IRQ7/IRQ15 would be
+  acknowledged as if it were real.
 - **Boot message typo.** `kmain()` prints `"Lumer kernel online!"` instead of `"Lumen kernel
   online!"` — a one-character fix in `kernel/kernel.c`.
 
@@ -234,7 +258,8 @@ make
 ```
 
 The build is expected to produce `build/lumen.bin`, a raw disk image containing the boot sector
-followed by the kernel.
+followed by the kernel, padded/sized so the boot sector's fixed 8-sector read covers the whole
+kernel image.
 
 ### Run
 
@@ -259,7 +284,11 @@ Lumen/
 │   └── boot_day1.asm   Early 16-bit prototype; retained for reference, not part of the build
 ├── kernel/
 │   ├── entry.asm       32-bit entry stub: stack setup, calls kmain()
-│   └── kernel.c        Kernel main: VGA output, then halt
+│   ├── kernel.c         Kernel main: VGA output, exception/timer handlers, idle loop
+│   ├── idt.c / idt.h    IDT setup for vectors 0, 3, and 32
+│   ├── isr.asm          ISR/IRQ stubs (isr0, isr3, irq0) and lidt wrapper
+│   ├── pic.c / pic.h    8259 PIC remap (IRQ0-15 -> vectors 32-47) and EOI
+│   └── pit.c / pit.h    8253/8254 PIT channel 0 programming
 ├── linker.ld           Linker script (kernel linked at 0x10000)
 ├── Makefile            Build automation (not yet written)
 └── run.sh              QEMU launch script (not yet written)
@@ -271,11 +300,11 @@ Lumen/
 
 Milestones are listed in intended order.
 
-1. **Boot and kernel foundation** (in progress): boot sector, protected mode, C entry, VGA output
-   driver.
-2. **Interrupts and input** (started): a minimal IDT (`kernel/idt.c`), ISR stubs (`kernel/isr.asm`),
-   and a divide-by-zero / breakpoint exception handler are working. Remaining: gates for the other
-   exception vectors, PIC remapping, PIT timer, keyboard driver.
+1. **Boot and kernel foundation** (done): boot sector, protected mode, C entry, VGA output driver.
+2. **Interrupts and input** (in progress): CPU exception handling (divide-by-zero, breakpoint), PIC
+   remap, and a PIT-driven IRQ0 timer are working. Remaining: keyboard driver (IRQ1), gates for the
+   other exception vectors (GPF, page fault, etc.), and a proper IRQ mask/unmask API instead of the
+   current preserve-on-remap behavior.
 3. **Memory management**: bump allocator, followed by a physical page allocator and paging.
 4. **Storage and filesystem**: disk driver and a simple filesystem.
 5. **Processes and shell**: task switching, system calls, and an interactive shell.
