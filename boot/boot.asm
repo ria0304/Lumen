@@ -24,7 +24,7 @@ start:
     xor bx, bx
 
     mov ah, 0x02
-    mov al, 0x08
+    mov al, 18
     mov ch, 0x00
     mov cl, 0x02
     mov dh, 0x00
@@ -114,7 +114,7 @@ protected_mode:
 
     ; Jump to kernel
     mov eax, 0x10000
-    jmp eax
+    jmp dword CODE_SEG:0x10000
 
 
 BITS 16
