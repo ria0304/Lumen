@@ -11,7 +11,7 @@ BUILD = build
 BOOT_ASM = boot/boot.asm
 
 KERNEL_OBJS = $(BUILD)/entry.o $(BUILD)/isr.o \
-              $(BUILD)/kernel.o $(BUILD)/idt.o $(BUILD)/pic.o $(BUILD)/pit.o $(BUILD)/keyboard.o $(BUILD)/heap.o
+              $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/idt.o $(BUILD)/pic.o $(BUILD)/pit.o $(BUILD)/keyboard.o $(BUILD)/heap.o
 
 KERNEL_ELF = $(BUILD)/kernel.elf
 KERNEL_BIN = $(BUILD)/kernel.bin

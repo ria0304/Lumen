@@ -1,11 +1,10 @@
 #include <stdint.h>
 #include "idt.h"
 #include "pic.h"
+#include "console.h"
 
 #define KBD_DATA_PORT 0x60
 #define KBD_PIC1_DATA 0x21
-
-extern void terminal_putchar(char c);
 
 static inline uint8_t inb(uint16_t port)
 {
