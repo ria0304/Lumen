@@ -84,24 +84,24 @@ void kmain(void)
 {
     terminal_clear();
 
-    terminal_write("Lumer kernel online!\n");
-    terminal_write("VGA text driver: OK\n");
-    terminal_write("Protected mode: 32-bit\n");
+    console_info("Lumer kernel online!");
+    console_info("VGA text driver: OK");
+    console_info("Protected mode: 32-bit");
 
     idt_init();
-    terminal_write("IDT initialized: OK\n");
+    console_info("IDT initialized: OK");
 
     pic_init();
-    terminal_write("PIC initialized: OK\n");
+    console_info("PIC initialized: OK");
 
     pit_init(100);
-    terminal_write("PIT initialized: 100 Hz\n");
+    console_info("PIT initialized: 100 Hz");
 
     kbd_init();
-    terminal_write("Keyboard initialized: OK\n");
+    console_info("Keyboard initialized: OK");
 
     heap_init();
-    terminal_write("Memory allocator: OK\n");
+    console_info("Memory allocator: OK");
 
     char *buffer = (char *)kmalloc(64);
 
@@ -115,9 +115,8 @@ void kmain(void)
         }
         buffer[i] = '\0';
 
-        terminal_write(buffer);
-        terminal_write("\n");
-        terminal_write("Heap used: ");
+        console_info(buffer);
+        console_info("Heap allocation test passed");
 
         uint32_t used = heap_used();
         char digits[10];
@@ -136,10 +135,10 @@ void kmain(void)
 
         terminal_write(" bytes\n");
     } else {
-        terminal_write("Memory allocation: FAILED\n");
+        console_error("Memory allocation: FAILED");
     }
 
-    terminal_write("Enabling timer + keyboard interrupts...\n");
+    console_info("Enabling timer + keyboard interrupts...");
 
     __asm__ volatile ("sti");
 

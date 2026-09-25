@@ -12,6 +12,27 @@ static int terminal_column = 0;
 static volatile uint16_t *vga =
     (volatile uint16_t *)VGA_MEMORY;
 
+static inline void outb(uint16_t port, uint8_t value)
+{
+    __asm__ volatile (
+        "outb %0, %1"
+        :
+        : "a"(value), "Nd"(port)
+    );
+}
+
+static void terminal_update_cursor(void)
+{
+    uint16_t position =
+        (uint16_t)(terminal_row * VGA_WIDTH + terminal_column);
+
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, position & 0xFF);
+
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (position >> 8) & 0xFF);
+}
+
 static void terminal_scroll(void)
 {
     for (int y = 1; y < VGA_HEIGHT; y++) {
@@ -28,6 +49,7 @@ static void terminal_scroll(void)
 
     terminal_row = VGA_HEIGHT - 1;
     terminal_column = 0;
+    terminal_update_cursor();
 }
 
 static void terminal_newline(void)
@@ -37,6 +59,8 @@ static void terminal_newline(void)
 
     if (terminal_row >= VGA_HEIGHT)
         terminal_scroll();
+    else
+        terminal_update_cursor();
 }
 
 void terminal_clear(void)
@@ -50,6 +74,7 @@ void terminal_clear(void)
 
     terminal_row = 0;
     terminal_column = 0;
+    terminal_update_cursor();
 }
 
 void terminal_putchar(char c)
@@ -68,6 +93,7 @@ void terminal_putchar(char c)
 
             vga[index] =
                 ((uint16_t)VGA_COLOR << 8) | ' ';
+            terminal_update_cursor();
         }
 
         return;
@@ -83,10 +109,33 @@ void terminal_putchar(char c)
 
     if (terminal_column >= VGA_WIDTH)
         terminal_newline();
+    else
+        terminal_update_cursor();
 }
 
 void terminal_write(const char *message)
 {
     for (int i = 0; message[i] != '\0'; i++)
         terminal_putchar(message[i]);
+}
+
+void console_info(const char *message)
+{
+    terminal_write("[INFO] ");
+    terminal_write(message);
+    terminal_putchar('\n');
+}
+
+void console_warn(const char *message)
+{
+    terminal_write("[WARN] ");
+    terminal_write(message);
+    terminal_putchar('\n');
+}
+
+void console_error(const char *message)
+{
+    terminal_write("[ERROR] ");
+    terminal_write(message);
+    terminal_putchar('\n');
 }
