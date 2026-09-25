@@ -2,12 +2,25 @@
 #include "shell.h"
 #include "console.h"
 #include "heap.h"
+#include "task.h"
 
 extern volatile uint32_t timer_ticks;
 
 static void shell_prompt(void)
 {
     terminal_write("Lumer> ");
+}
+
+static uint32_t shell_parse_uint(const char *text)
+{
+    uint32_t value = 0;
+
+    while (*text >= '0' && *text <= '9') {
+        value = value * 10 + (uint32_t)(*text - '0');
+        text++;
+    }
+
+    return value;
 }
 
 static void shell_print_uint(uint32_t value)
@@ -61,7 +74,7 @@ void shell_handle_line(const char *line)
         line[3] == 'p' &&
         line[4] == '\0') {
 
-        console_info("Commands: help, clear, echo, about, version, mem, uptime");
+        console_info("Commands: help, clear, echo, about, version, mem, uptime, task, taskkill, tasks");
     }
     else if (string_starts_with(line, "echo ")) {
         terminal_write(line + 5);
@@ -115,6 +128,55 @@ void shell_handle_line(const char *line)
         shell_print_uint(timer_ticks / 100);
         terminal_write(" seconds");
         terminal_putchar('\n');
+    }
+    else if (line[0] == 't' &&
+             line[1] == 'a' &&
+             line[2] == 's' &&
+             line[3] == 'k' &&
+             line[4] == '\0') {
+        int id = task_create();
+
+        if (id >= 0) {
+            terminal_write("[INFO] Task created: ID ");
+            shell_print_uint((uint32_t)id);
+            terminal_putchar('\n');
+        } else {
+            console_error("Task creation failed");
+        }
+    }
+    else if (string_starts_with(line, "taskkill ")) {
+        uint32_t id = shell_parse_uint(line + 9);
+
+        if (task_terminate(id) == 0) {
+            terminal_write("[INFO] Task terminated: ID ");
+            shell_print_uint(id);
+            terminal_putchar('\n');
+        } else {
+            console_error("Task termination failed");
+        }
+    }
+    else if (line[0] == 't' &&
+             line[1] == 'a' &&
+             line[2] == 's' &&
+             line[3] == 'k' &&
+             line[4] == 's' &&
+             line[5] == '\0') {
+        terminal_write("[INFO] Active tasks: ");
+        shell_print_uint(task_count());
+        terminal_putchar('\n');
+
+        for (uint32_t id = 1; id < 100; id++) {
+            const task_t *task = task_get(id);
+
+            if (task != 0 &&
+                task->state != TASK_UNUSED &&
+                task->state != TASK_TERMINATED) {
+                terminal_write("ID ");
+                shell_print_uint(task->id);
+                terminal_write(" READY");
+                terminal_putchar('\n');
+            }
+        }
     }
     else {
         console_warn("Unknown command");
