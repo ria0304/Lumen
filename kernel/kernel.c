@@ -2,6 +2,7 @@
 #include "idt.h"
 #include "pic.h"
 #include "pit.h"
+#include "heap.h"
 
 extern void kbd_init(void);
 
@@ -38,6 +39,17 @@ void terminal_putchar(char c)
 
         if (terminal_row >= VGA_HEIGHT)
             terminal_row = 0;
+
+        return;
+    }
+
+    if (c == '\b') {
+        if (terminal_column > 0) {
+            terminal_column--;
+
+            int index = terminal_row * VGA_WIDTH + terminal_column;
+            vga[index] = ((unsigned short)VGA_COLOR << 8) | ' ';
+        }
 
         return;
     }
@@ -151,6 +163,45 @@ void kmain(void)
 
     kbd_init();
     terminal_write("Keyboard initialized: OK\n");
+
+    heap_init();
+    terminal_write("Memory allocator: OK\n");
+
+    char *buffer = (char *)kmalloc(64);
+
+    if (buffer != 0) {
+        const char message[] = "Dynamic buffer allocation: WORKING";
+
+        int i = 0;
+        while (message[i] != '\0') {
+            buffer[i] = message[i];
+            i++;
+        }
+        buffer[i] = '\0';
+
+        terminal_write(buffer);
+        terminal_write("\n");
+        terminal_write("Heap used: ");
+
+        uint32_t used = heap_used();
+        char digits[10];
+        int count = 0;
+
+        while (used > 0) {
+            digits[count++] = '0' + (used % 10);
+            used /= 10;
+        }
+
+        if (count == 0)
+            terminal_putchar('0');
+
+        while (count > 0)
+            terminal_putchar(digits[--count]);
+
+        terminal_write(" bytes\n");
+    } else {
+        terminal_write("Memory allocation: FAILED\n");
+    }
 
     terminal_write("Enabling timer + keyboard interrupts...\n");
 
