@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "line_editor.h"
 #include "console.h"
+#include "shell.h"
 
 static char line_buffer[LINE_BUFFER_SIZE];
 static char submitted_buffer[LINE_BUFFER_SIZE];
@@ -30,6 +31,8 @@ void line_editor_handle_char(char c)
 
         for (uint32_t i = 0; i <= line_length; i++)
             submitted_buffer[i] = line_buffer[i];
+
+        shell_handle_line(submitted_buffer);
 
         line_length = 0;
         line_buffer[0] = '\0';

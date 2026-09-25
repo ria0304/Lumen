@@ -5,6 +5,7 @@
 #include "heap.h"
 #include "console.h"
 #include "line_editor.h"
+#include "shell.h"
 
 extern void kbd_init(void);
 
@@ -145,6 +146,8 @@ void kmain(void)
 
     line_editor_init();
     console_info("Line editor initialized: OK");
+
+    shell_init();
 
     heap_init();
     console_info("Memory allocator: OK");
