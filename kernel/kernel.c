@@ -12,7 +12,7 @@ extern void kbd_init(void);
 #define VGA_MEMORY 0xB8000
 #define VGA_COLOR 0x07
 
-static volatile uint32_t timer_ticks = 0;
+volatile uint32_t timer_ticks = 0;
 
 void exception_handler(uint32_t vector)
 {
