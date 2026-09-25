@@ -19,6 +19,7 @@ extern void isr7(void);
 extern void isr8(void);
 extern void isr13(void);
 extern void isr14(void);
+extern void isr_default(void);
 extern void irq0(void);
 extern void irq1(void);
 
@@ -38,8 +39,18 @@ static void idt_set_gate(
 
 void idt_init(void)
 {
-    for (int i = 0; i < IDT_ENTRIES; i++) {
-        idt_set_gate(i, 0, 0, 0);
+    /*
+     * Install a safe default handler for unused hardware/software
+     * interrupt vectors. CPU exception vectors are installed below
+     * with their correct ISR stubs.
+     */
+    for (int i = 32; i < IDT_ENTRIES; i++) {
+        idt_set_gate(
+            i,
+            (uint32_t)isr_default,
+            KERNEL_CODE_SEGMENT,
+            IDT_INTERRUPT_GATE
+        );
     }
 
     /* CPU exceptions */

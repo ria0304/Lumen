@@ -12,6 +12,7 @@ global isr7
 global isr8
 global isr13
 global isr14
+global isr_default
 global irq0
 global irq1
 
@@ -116,6 +117,14 @@ isr14:
     add esp, 4
     popa
     add esp, 4
+    iret
+
+isr_default:
+    pusha
+    push dword 255
+    call exception_handler
+    add esp, 4
+    popa
     iret
 
 irq0:
