@@ -4,6 +4,7 @@
 #include "pit.h"
 #include "heap.h"
 #include "console.h"
+#include "line_editor.h"
 
 extern void kbd_init(void);
 
@@ -141,6 +142,9 @@ void kmain(void)
 
     kbd_init();
     console_info("Keyboard initialized: OK");
+
+    line_editor_init();
+    console_info("Line editor initialized: OK");
 
     heap_init();
     console_info("Memory allocator: OK");

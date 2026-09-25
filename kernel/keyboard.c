@@ -2,6 +2,7 @@
 #include "idt.h"
 #include "pic.h"
 #include "console.h"
+#include "line_editor.h"
 
 #define KBD_DATA_PORT 0x60
 #define KBD_PIC1_DATA 0x21
@@ -99,6 +100,6 @@ void kbd_handler(void)
             c = kbd_us_map[scancode];
 
         if (c != 0)
-            terminal_putchar(c);
+            line_editor_handle_char(c);
     }
 }
