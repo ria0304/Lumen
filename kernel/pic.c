@@ -24,9 +24,6 @@ static inline uint8_t inb(uint16_t port)
 
 void pic_init(void)
 {
-    uint8_t master_mask = inb(PIC1_DATA);
-    uint8_t slave_mask  = inb(PIC2_DATA);
-
     /* Start initialization sequence */
     outb(PIC1_COMMAND, 0x11);
     outb(PIC2_COMMAND, 0x11);
@@ -48,9 +45,16 @@ void pic_init(void)
     outb(PIC1_DATA, 0x01);
     outb(PIC2_DATA, 0x01);
 
-    /* Restore interrupt masks */
-    outb(PIC1_DATA, master_mask);
-    outb(PIC2_DATA, slave_mask);
+    /*
+     * Mask everything by default. Only vectors that have a real
+     * IDT handler installed should ever be unmasked -- an unmasked
+     * IRQ with no handler leads straight to a triple fault.
+     * IRQ0 (timer) and IRQ1 (keyboard) are enabled here; the slave
+     * PIC's cascade line (IRQ2) is left masked since nothing behind
+     * it is handled yet.
+     */
+    outb(PIC1_DATA, 0xFC); /* mask all master IRQs except 0 and 1 */
+    outb(PIC2_DATA, 0xFF); /* mask all slave IRQs */
 }
 
 void pic_send_eoi(uint8_t irq)

@@ -3,6 +3,8 @@
 #include "pic.h"
 #include "pit.h"
 
+extern void kbd_init(void);
+
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
 #define VGA_MEMORY 0xB8000
@@ -28,7 +30,7 @@ static void terminal_clear(void)
     terminal_column = 0;
 }
 
-static void terminal_putchar(char c)
+void terminal_putchar(char c)
 {
     if (c == '\n') {
         terminal_column = 0;
@@ -147,7 +149,10 @@ void kmain(void)
     pit_init(100);
     terminal_write("PIT initialized: 100 Hz\n");
 
-    terminal_write("Enabling timer interrupts...\n");
+    kbd_init();
+    terminal_write("Keyboard initialized: OK\n");
+
+    terminal_write("Enabling timer + keyboard interrupts...\n");
 
     __asm__ volatile ("sti");
 
