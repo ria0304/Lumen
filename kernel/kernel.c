@@ -14,17 +14,59 @@ static volatile uint32_t timer_ticks = 0;
 
 void exception_handler(uint32_t vector)
 {
-    terminal_write("\nEXCEPTION RECEIVED\n");
+    console_error("CPU EXCEPTION RECEIVED");
 
-    if (vector == 0) {
-        terminal_write("Exception: Divide by zero\n");
-    } else if (vector == 3) {
-        terminal_write("Exception: Breakpoint\n");
-    } else {
-        terminal_write("Exception: Unknown\n");
+    switch (vector) {
+        case 0:
+            console_error("Exception 0: Divide by zero");
+            break;
+
+        case 1:
+            console_error("Exception 1: Debug");
+            break;
+
+        case 2:
+            console_error("Exception 2: Non-maskable interrupt");
+            break;
+
+        case 3:
+            console_error("Exception 3: Breakpoint");
+            break;
+
+        case 4:
+            console_error("Exception 4: Overflow");
+            break;
+
+        case 5:
+            console_error("Exception 5: Bound range exceeded");
+            break;
+
+        case 6:
+            console_error("Exception 6: Invalid opcode");
+            break;
+
+        case 7:
+            console_error("Exception 7: Device not available");
+            break;
+
+        case 8:
+            console_error("Exception 8: Double fault");
+            break;
+
+        case 13:
+            console_error("Exception 13: General protection fault");
+            break;
+
+        case 14:
+            console_error("Exception 14: Page fault");
+            break;
+
+        default:
+            console_error("Exception: Unhandled CPU exception");
+            break;
     }
 
-    terminal_write("IDT: WORKING\n");
+    console_error("System halted");
 
     for (;;) {
         __asm__ volatile ("cli");
