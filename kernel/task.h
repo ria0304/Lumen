@@ -2,6 +2,7 @@
 #define TASK_H
 
 #include <stdint.h>
+#include "privilege.h"
 
 #define MAX_TASKS 16
 
@@ -16,6 +17,7 @@ typedef enum {
 typedef struct {
     uint32_t id;
     task_state_t state;
+    uint32_t privilege;
 } task_t;
 
 void task_init(void);

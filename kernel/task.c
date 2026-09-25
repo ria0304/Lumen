@@ -11,6 +11,7 @@ void task_init(void)
     for (int i = 0; i < MAX_TASKS; i++) {
         tasks[i].id = 0;
         tasks[i].state = TASK_UNUSED;
+        tasks[i].privilege = KERNEL_RING;
     }
 
     next_task_id = 1;
@@ -25,6 +26,7 @@ int task_create(void)
         if (tasks[i].state == TASK_UNUSED) {
             tasks[i].id = next_task_id++;
             tasks[i].state = TASK_READY;
+            tasks[i].privilege = KERNEL_RING;
             active_tasks++;
 
             return (int)tasks[i].id;

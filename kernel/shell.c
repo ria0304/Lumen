@@ -174,6 +174,13 @@ void shell_handle_line(const char *line)
                 terminal_write("ID ");
                 shell_print_uint(task->id);
                 terminal_write(" READY");
+
+                if (task->privilege == KERNEL_RING) {
+                    terminal_write(" RING0");
+                } else if (task->privilege == USER_RING) {
+                    terminal_write(" RING3");
+                }
+
                 terminal_putchar('\n');
             }
         }
