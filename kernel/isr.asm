@@ -15,10 +15,12 @@ global isr14
 global isr_default
 global irq0
 global irq1
+global isr_syscall
 
 extern exception_handler
 extern timer_handler
 extern kbd_handler
+extern syscall_handler
 
 idt_load:
     mov eax, [esp + 4]
@@ -136,5 +138,12 @@ irq0:
 irq1:
     pusha
     call kbd_handler
+    popa
+    iret
+
+
+isr_syscall:
+    pusha
+    call syscall_handler
     popa
     iret

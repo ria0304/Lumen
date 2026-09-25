@@ -24,7 +24,7 @@ start:
     xor bx, bx
 
     mov ah, 0x02
-    mov al, 19
+    mov al, 22
     mov ch, 0x00
     mov cl, 0x02
     mov dh, 0x00
@@ -147,6 +147,22 @@ gdt_data:
     dw 0x0000
     db 0x00
     db 10010010b
+    db 11001111b
+    db 0x00
+
+gdt_user_code:
+    dw 0xFFFF
+    dw 0x0000
+    db 0x00
+    db 11111010b
+    db 11001111b
+    db 0x00
+
+gdt_user_data:
+    dw 0xFFFF
+    dw 0x0000
+    db 0x00
+    db 11110010b
     db 11001111b
     db 0x00
 

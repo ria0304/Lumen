@@ -3,6 +3,8 @@
 #define IDT_ENTRIES 256
 #define KERNEL_CODE_SEGMENT 0x08
 #define IDT_INTERRUPT_GATE 0x8E
+#define SYSCALL_VECTOR 128
+#define SYSCALL_GATE 0xEE
 
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idtp;
@@ -20,6 +22,7 @@ extern void isr8(void);
 extern void isr13(void);
 extern void isr14(void);
 extern void isr_default(void);
+extern void isr_syscall(void);
 extern void irq0(void);
 extern void irq1(void);
 
@@ -129,6 +132,14 @@ void idt_init(void)
         (uint32_t)isr14,
         KERNEL_CODE_SEGMENT,
         IDT_INTERRUPT_GATE
+    );
+
+    /* User-mode system call entry */
+    idt_set_gate(
+        SYSCALL_VECTOR,
+        (uint32_t)isr_syscall,
+        KERNEL_CODE_SEGMENT,
+        SYSCALL_GATE
     );
 
     /* Hardware timer IRQ0 -> vector 32 */

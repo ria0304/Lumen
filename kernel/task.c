@@ -20,13 +20,16 @@ void task_init(void)
     console_info("Task manager initialized: OK");
 }
 
-int task_create(void)
+int task_create_with_privilege(uint32_t privilege)
 {
+    if (privilege != KERNEL_RING && privilege != USER_RING)
+        return -1;
+
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == TASK_UNUSED) {
             tasks[i].id = next_task_id++;
             tasks[i].state = TASK_READY;
-            tasks[i].privilege = KERNEL_RING;
+            tasks[i].privilege = privilege;
             active_tasks++;
 
             return (int)tasks[i].id;
@@ -34,6 +37,11 @@ int task_create(void)
     }
 
     return -1;
+}
+
+int task_create(void)
+{
+    return task_create_with_privilege(KERNEL_RING);
 }
 
 int task_terminate(uint32_t id)

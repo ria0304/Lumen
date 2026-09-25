@@ -1,4 +1,6 @@
 #include <stdint.h>
+#include "gdt.h"
+#include "tss.h"
 #include "idt.h"
 #include "pic.h"
 #include "pit.h"
@@ -129,6 +131,10 @@ void kmain(void)
 {
     terminal_clear();
 
+    tss_init();
+    gdt_init();
+    tss_load();
+
     console_info("Lumer kernel online!");
     console_info("VGA text driver: OK");
     console_info("Protected mode: 32-bit");
@@ -193,6 +199,7 @@ void kmain(void)
     console_info("Enabling timer + keyboard interrupts...");
 
     __asm__ volatile ("sti");
+
 
     for (;;) {
         __asm__ volatile ("hlt");

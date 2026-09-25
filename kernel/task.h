@@ -23,6 +23,7 @@ typedef struct {
 void task_init(void);
 
 int task_create(void);
+int task_create_with_privilege(uint32_t privilege);
 int task_terminate(uint32_t id);
 
 const task_t *task_get(uint32_t id);

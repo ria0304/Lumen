@@ -4,4 +4,9 @@
 #define KERNEL_RING 0
 #define USER_RING   3
 
+#define KERNEL_CODE_SELECTOR 0x08
+#define KERNEL_DATA_SELECTOR 0x10
+#define USER_CODE_SELECTOR   0x1B
+#define USER_DATA_SELECTOR   0x23
+
 #endif

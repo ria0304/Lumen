@@ -4,6 +4,8 @@
 #include "heap.h"
 #include "task.h"
 
+extern void enter_user_mode(void);
+
 extern volatile uint32_t timer_ticks;
 
 static void shell_prompt(void)
@@ -143,6 +145,37 @@ void shell_handle_line(const char *line)
         } else {
             console_error("Task creation failed");
         }
+    }
+    else if (line[0] == 't' &&
+             line[1] == 'a' &&
+             line[2] == 's' &&
+             line[3] == 'k' &&
+             line[4] == 'u' &&
+             line[5] == 's' &&
+             line[6] == 'e' &&
+             line[7] == 'r' &&
+             line[8] == '\0') {
+        int id = task_create_with_privilege(USER_RING);
+
+        if (id >= 0) {
+            terminal_write("[INFO] User task created: ID ");
+            shell_print_uint((uint32_t)id);
+            terminal_putchar('\n');
+        } else {
+            console_error("User task creation failed");
+        }
+    }
+    else if (line[0] == 'u' &&
+             line[1] == 's' &&
+             line[2] == 'e' &&
+             line[3] == 'r' &&
+             line[4] == 'm' &&
+             line[5] == 'o' &&
+             line[6] == 'd' &&
+             line[7] == 'e' &&
+             line[8] == '\0') {
+        console_info("Entering user mode...");
+        enter_user_mode();
     }
     else if (string_starts_with(line, "taskkill ")) {
         uint32_t id = shell_parse_uint(line + 9);
