@@ -38,7 +38,7 @@ void shell_handle_line(const char *line)
         line[3] == 'p' &&
         line[4] == '\0') {
 
-        console_info("Commands: help, clear, echo");
+        console_info("Commands: help, clear, echo, about, version");
     }
     else if (string_starts_with(line, "echo ")) {
         terminal_write(line + 5);
@@ -51,6 +51,26 @@ void shell_handle_line(const char *line)
              line[4] == 'r' &&
              line[5] == '\0') {
         terminal_clear();
+    }
+    else if (line[0] == 'a' &&
+             line[1] == 'b' &&
+             line[2] == 'o' &&
+             line[3] == 'u' &&
+             line[4] == 't' &&
+             line[5] == '\0') {
+        console_info("Lumer OS.");
+        console_info("Built from scratch in C and x86 assembly.");
+        console_info("Custom bootloader, kernel, interrupts, memory, keyboard, and shell.");
+    }
+    else if (line[0] == 'v' &&
+             line[1] == 'e' &&
+             line[2] == 'r' &&
+             line[3] == 's' &&
+             line[4] == 'i' &&
+             line[5] == 'o' &&
+             line[6] == 'n' &&
+             line[7] == '\0') {
+        console_info("Lumer OS version 0.1");
     }
     else {
         console_warn("Unknown command");
