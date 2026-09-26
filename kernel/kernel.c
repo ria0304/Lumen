@@ -2,6 +2,7 @@
 #include "gdt.h"
 #include "tss.h"
 #include "scheduler.h"
+#include "paging.h"
 #include "idt.h"
 #include "pic.h"
 #include "pit.h"
@@ -142,6 +143,7 @@ void kmain(void)
     console_info("Protected mode: 32-bit");
 
     idt_init();
+    paging_init();
     console_info("IDT initialized: OK");
 
     pic_init();

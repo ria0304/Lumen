@@ -24,7 +24,7 @@ start:
     xor bx, bx
 
     mov ah, 0x02
-    mov al, 25
+    mov al, 26
     mov ch, 0x00
     mov cl, 0x02
     mov dh, 0x00
