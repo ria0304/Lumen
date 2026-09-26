@@ -110,7 +110,8 @@ void shell_handle_line(const char *line)
 
         console_info("Commands: help, clear, echo, about, version, mem, uptime, task, taskkill, tasks, taskuser");
         console_info("Protection: vmtest, privtest");
-        console_info("Storage: format, ls, cat <file>, write <file> <text>, rm <file>, storage-test, run <file>");
+        console_info("Programs: install, run <file>");
+        console_info("Storage: format, ls, cat <file>, write <file> <text>, rm <file>, storage-test");
     }
     else if (string_starts_with(line, "echo ")) {
         terminal_write(line + 5);
@@ -397,6 +398,26 @@ void shell_handle_line(const char *line)
             console_info("File deleted");
         } else {
             console_error("No such file");
+        }
+    }
+    else if (line[0] == 'i' &&
+             line[1] == 'n' &&
+             line[2] == 's' &&
+             line[3] == 't' &&
+             line[4] == 'a' &&
+             line[5] == 'l' &&
+             line[6] == 'l' &&
+             line[7] == '\0') {
+
+        if (fs_write(
+                "hello.bin",
+                ring3_test_program,
+                ring3_test_program_size
+            ) == 0) {
+
+            console_info("Installed hello.bin");
+        } else {
+            console_error("Failed to install hello.bin");
         }
     }
     else if (string_starts_with(line, "run ")) {
