@@ -109,105 +109,100 @@ as a protected-mode sanity check.
 ```mermaid
 flowchart TD
 
-subgraph group_boot["Boot Foundation"]
-  node_boot_sector["Boot Sector<br/>[boot.asm]"]
-  node_protected_mode["Protected Mode<br/>[boot.asm]"]
+subgraph group_boot["Boot and Entry"]
+  node_bootloader["Bootloader<br/>[boot.asm]"]
+  node_entry["Kernel Entry<br/>[entry.asm]"]
 end
 
-subgraph group_kernel["Kernel Runtime"]
-  node_kernel_entry["Kernel Entry<br/>[entry.asm]"]
-  node_kernel_main["Kernel Main<br/>[kernel.c]"]
-  node_vga_terminal["VGA Terminal<br/>[console.c]"]
-  node_gdt_tss["GDT + TSS<br/>[gdt.c / tss.c]"]
-end
-
-subgraph group_interrupts["Interrupt Handling"]
-  node_idt["IDT Setup<br/>[idt.c]"]
-  node_isr_stubs["ISR/IRQ Stubs<br/>[isr.asm]"]
-  node_exception_handler["Exception Handler<br/>[kernel.c]"]
-  node_pic["PIC Remap<br/>[pic.c]"]
-  node_pit["PIT Timer<br/>[pit.c]"]
-  node_keyboard["Keyboard Driver<br/>[keyboard.c]"]
+subgraph group_kernel["Kernel Foundations"]
+  node_kernel_main["Kernel Init<br/>[kernel.c]"]
+  node_gdt["GDT<br/>[gdt.c]"]
+  node_tss["TSS<br/>[tss.c]"]
+  node_idt["Interrupt Table<br/>[idt.c]"]
+  node_isr["Interrupt Stubs<br/>[isr.asm]"]
+  node_pic["PIC<br/>[pic.c]"]
+  node_pit["Timer<br/>[pit.c]"]
 end
 
 subgraph group_memory["Memory Management"]
-  node_paging["Paging + Address Spaces<br/>[paging.c]"]
   node_frame["Frame Allocator<br/>[frame.c]"]
-  node_heap["Heap: kmalloc/kfree<br/>[heap.c]"]
+  node_paging["Paging<br/>[paging.c]"]
+  node_heap["Kernel Heap<br/>[heap.c]"]
 end
 
-subgraph group_tasking["Multitasking"]
+subgraph group_interaction["Console and Shell"]
+  node_keyboard["Keyboard Driver<br/>[keyboard.c]"]
+  node_editor["Line Editor<br/>[line_editor.c]"]
+  node_shell["Interactive Shell<br/>[shell.c]"]
+  node_console["VGA Console<br/>[console.c]"]
+end
+
+subgraph group_execution["Tasks and Protection"]
   node_task["Task Manager<br/>[task.c]"]
   node_scheduler["Scheduler<br/>[scheduler.c]"]
-  node_ring3["Ring 3 / User Mode<br/>[ring3.c, usermode.asm]"]
-  node_syscall["Syscall Gate<br/>[syscall.c]"]
-end
-
-subgraph group_shell["Shell"]
-  node_line_editor["Line Editor<br/>[line_editor.c]"]
-  node_shell["Shell Commands<br/>[shell.c]"]
-end
-
-subgraph group_roadmap["Planned Subsystems"]
-  node_filesystem[("Filesystem Storage")]
-  node_disk[("Disk Driver")]
-  node_graphics["Graphics Interface"]
+  node_ring3["User Mode<br/>[ring3.c]"]
+  node_user_asm["User Program<br/>[usermode.asm]"]
+  node_syscall["Syscall Handler<br/>[syscall.c]"]
 end
 
 node_bios(("BIOS"))
+node_keyboard_user(("Keyboard User"))
 
-node_bios -->|"loads sector"| node_boot_sector
-node_boot_sector -->|"enters mode"| node_protected_mode
-node_boot_sector -->|"transfers control"| node_kernel_entry
-node_kernel_entry -->|"calls kmain"| node_kernel_main
-node_kernel_main -->|"writes text"| node_vga_terminal
-node_kernel_main -->|"builds segments"| node_gdt_tss
-node_kernel_main -->|"initializes IDT"| node_idt
-node_kernel_main -->|"remaps PIC"| node_pic
-node_kernel_main -->|"programs channel 0"| node_pit
-node_kernel_main -->|"sets up paging"| node_paging
-node_paging -->|"backed by"| node_frame
-node_kernel_main -->|"initializes heap"| node_heap
-node_kernel_main -->|"starts tasking"| node_task
-node_task -->|"scheduled by"| node_scheduler
-node_scheduler -->|"switches CR3 via"| node_paging
-node_scheduler -->|"resumes esp0 via"| node_gdt_tss
-node_task -->|"can enter"| node_ring3
-node_ring3 -->|"traps via int 0x80"| node_syscall
-node_idt -->|"dispatches vector"| node_isr_stubs
-node_isr_stubs -->|"calls handler"| node_exception_handler
-node_isr_stubs -->|"calls handler"| node_scheduler
-node_isr_stubs -->|"calls handler"| node_syscall
-node_pic -->|"drives IRQ1"| node_keyboard
-node_keyboard -->|"feeds keys"| node_line_editor
-node_line_editor -->|"submits line"| node_shell
-node_shell -->|"creates/kills"| node_task
-node_exception_handler -->|"terminates faulted Ring 3 task"| node_task
+node_bios -->|"loads sector"| node_bootloader
+node_bootloader -->|"loads kernel"| node_entry
+node_entry -->|"calls kmain"| node_kernel_main
+node_kernel_main -->|"initializes"| node_gdt
+node_kernel_main -->|"initializes"| node_tss
+node_kernel_main -->|"initializes"| node_idt
+node_kernel_main -->|"initializes"| node_paging
+node_kernel_main -->|"initializes"| node_frame
+node_kernel_main -->|"initializes"| node_pic
+node_kernel_main -->|"initializes"| node_pit
+node_kernel_main -->|"initializes"| node_keyboard
+node_kernel_main -->|"initializes"| node_editor
+node_kernel_main -->|"initializes"| node_shell
+node_kernel_main -->|"initializes"| node_task
+node_kernel_main -->|"initializes"| node_scheduler
+node_kernel_main -->|"initializes"| node_heap
+node_idt -->|"loads stubs"| node_isr
+node_keyboard_user -->|"presses keys"| node_keyboard
+node_keyboard -->|"sends characters"| node_editor
+node_editor -->|"submits line"| node_shell
+node_shell -->|"prints output"| node_console
+node_shell -->|"manages tasks"| node_task
+node_shell -->|"enters user mode"| node_ring3
+node_task -->|"creates address spaces"| node_paging
+node_task -->|"allocates frames"| node_frame
+node_task -->|"sets up user task"| node_ring3
+node_user_asm -->|"provides enter_user_mode / iret"| node_ring3
+node_pit -->|"ticks scheduler"| node_scheduler
+node_scheduler -->|"selects task"| node_task
+node_scheduler -->|"switches directory"| node_paging
+node_scheduler -->|"sets kernel stack"| node_tss
+node_idt -->|"routes syscall gate"| node_syscall
+node_kernel_main -->|"reports status"| node_console
 
-click node_boot_sector "https://github.com/ria0304/lumen/blob/main/boot/boot.asm"
-click node_protected_mode "https://github.com/ria0304/lumen/blob/main/boot/boot.asm"
-click node_kernel_entry "https://github.com/ria0304/lumen/blob/main/kernel/entry.asm"
+click node_bootloader "https://github.com/ria0304/lumen/blob/main/boot/boot.asm"
+click node_entry "https://github.com/ria0304/lumen/blob/main/kernel/entry.asm"
 click node_kernel_main "https://github.com/ria0304/lumen/blob/main/kernel/kernel.c"
-click node_vga_terminal "https://github.com/ria0304/lumen/blob/main/kernel/console.c"
-click node_gdt_tss "https://github.com/ria0304/lumen/blob/main/kernel/gdt.c"
+click node_gdt "https://github.com/ria0304/lumen/blob/main/kernel/gdt.c"
+click node_tss "https://github.com/ria0304/lumen/blob/main/kernel/tss.c"
 click node_idt "https://github.com/ria0304/lumen/blob/main/kernel/idt.c"
-click node_isr_stubs "https://github.com/ria0304/lumen/blob/main/kernel/isr.asm"
-click node_exception_handler "https://github.com/ria0304/lumen/blob/main/kernel/kernel.c"
+click node_isr "https://github.com/ria0304/lumen/blob/main/kernel/isr.asm"
 click node_pic "https://github.com/ria0304/lumen/blob/main/kernel/pic.c"
 click node_pit "https://github.com/ria0304/lumen/blob/main/kernel/pit.c"
-click node_keyboard "https://github.com/ria0304/lumen/blob/main/kernel/keyboard.c"
-click node_paging "https://github.com/ria0304/lumen/blob/main/kernel/paging.c"
 click node_frame "https://github.com/ria0304/lumen/blob/main/kernel/frame.c"
+click node_paging "https://github.com/ria0304/lumen/blob/main/kernel/paging.c"
 click node_heap "https://github.com/ria0304/lumen/blob/main/kernel/heap.c"
+click node_keyboard "https://github.com/ria0304/lumen/blob/main/kernel/keyboard.c"
+click node_editor "https://github.com/ria0304/lumen/blob/main/kernel/line_editor.c"
+click node_shell "https://github.com/ria0304/lumen/blob/main/kernel/shell.c"
+click node_console "https://github.com/ria0304/lumen/blob/main/kernel/console.c"
 click node_task "https://github.com/ria0304/lumen/blob/main/kernel/task.c"
 click node_scheduler "https://github.com/ria0304/lumen/blob/main/kernel/scheduler.c"
 click node_ring3 "https://github.com/ria0304/lumen/blob/main/kernel/ring3.c"
+click node_user_asm "https://github.com/ria0304/lumen/blob/main/kernel/usermode.asm"
 click node_syscall "https://github.com/ria0304/lumen/blob/main/kernel/syscall.c"
-click node_line_editor "https://github.com/ria0304/lumen/blob/main/kernel/line_editor.c"
-click node_shell "https://github.com/ria0304/lumen/blob/main/kernel/shell.c"
-click node_filesystem "https://github.com/ria0304/lumen/tree/main/kernel"
-click node_disk "https://github.com/ria0304/lumen/tree/main/kernel"
-click node_graphics "https://github.com/ria0304/lumen/tree/main/kernel"
 
 classDef toneNeutral fill:#f8fafc,stroke:#334155,stroke-width:1.5px,color:#0f172a
 classDef toneBlue fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#172554
@@ -216,15 +211,11 @@ classDef toneMint fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
 classDef toneRose fill:#ffe4e6,stroke:#e11d48,stroke-width:1.5px,color:#881337
 classDef toneIndigo fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81
 classDef toneTeal fill:#ccfbf1,stroke:#0f766e,stroke-width:1.5px,color:#134e4a
-classDef tonePurple fill:#ede9fe,stroke:#7c3aed,stroke-width:1.5px,color:#3b0764
-class node_boot_sector,node_protected_mode toneBlue
-class node_kernel_entry,node_kernel_main,node_vga_terminal,node_gdt_tss toneAmber
-class node_idt,node_isr_stubs,node_exception_handler,node_pic,node_pit,node_keyboard toneMint
-class node_paging,node_frame,node_heap toneTeal
-class node_task,node_scheduler,node_ring3,node_syscall tonePurple
-class node_line_editor,node_shell toneAmber
-class node_filesystem,node_disk,node_graphics toneRose
-class node_bios toneIndigo
+class node_bootloader,node_entry,node_keyboard_user toneBlue
+class node_kernel_main,node_gdt,node_tss,node_idt,node_isr,node_pic,node_pit toneAmber
+class node_frame,node_paging,node_heap toneMint
+class node_keyboard,node_editor,node_shell,node_console toneRose
+class node_task,node_scheduler,node_ring3,node_user_asm,node_syscall,node_bios toneIndigo
 ```
 
 ---
