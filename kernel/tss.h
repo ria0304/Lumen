@@ -33,7 +33,10 @@ typedef struct {
     uint16_t iomap_base;
 } __attribute__((packed)) tss_t;
 
+extern tss_t kernel_tss;
+
 void tss_init(void);
 void tss_load(void);
+int tss_run_self_test(void);
 
 #endif

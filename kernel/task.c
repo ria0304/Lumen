@@ -1,30 +1,21 @@
 #include <stdint.h>
 #include "task.h"
 #include "console.h"
-#include "heap.h"
 
 extern void task_demo_entry(void);
 
 static task_t tasks[MAX_TASKS + 1];
-static uint32_t active_tasks = 0;
 
 /*
- * Build the stack that POPA + IRET expects.
- *
- * Final layout at switch_esp:
- *
- *   EDI
- *   ESI
- *   EBP
- *   ESP dummy
- *   EBX
- *   EDX
- *   ECX
- *   EAX
- *   EIP
- *   CS
- *   EFLAGS
+ * Fixed kernel stacks live in BSS instead of consuming the
+ * small bump heap. This gives every kernel task a permanent
+ * 4 KiB stack and allows terminated task slots to be reused.
  */
+static uint8_t task_stacks[MAX_TASKS + 1][TASK_STACK_SIZE]
+    __attribute__((aligned(16)));
+
+static uint32_t active_tasks = 0;
+
 static uint32_t task_prepare_stack(
     uint32_t stack_base,
     uint32_t stack_size,
@@ -34,18 +25,33 @@ static uint32_t task_prepare_stack(
     uint32_t *sp =
         (uint32_t *)(stack_base + stack_size);
 
-    *--sp = 0x00000202;                 /* EFLAGS */
-    *--sp = KERNEL_CODE_SELECTOR;       /* CS */
-    *--sp = entry;                       /* EIP */
+    /*
+     * Final interrupt-return layout:
+     *
+     * EDI
+     * ESI
+     * EBP
+     * ESP dummy
+     * EBX
+     * EDX
+     * ECX
+     * EAX
+     * EIP
+     * CS
+     * EFLAGS
+     */
+    *--sp = 0x00000202;
+    *--sp = KERNEL_CODE_SELECTOR;
+    *--sp = entry;
 
-    *--sp = 0;                           /* EAX */
-    *--sp = 0;                           /* ECX */
-    *--sp = 0;                           /* EDX */
-    *--sp = 0;                           /* EBX */
-    *--sp = 0;                           /* ESP - ignored by POPA */
-    *--sp = 0;                           /* EBP */
-    *--sp = 0;                           /* ESI */
-    *--sp = 0;                           /* EDI */
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
 
     return (uint32_t)sp;
 }
@@ -73,14 +79,11 @@ void task_init(void)
         tasks[i].context.eflags = 0x202;
     }
 
-    /*
-     * Task 0 represents the kernel/shell execution context.
-     * Its interrupt frame is captured the first time the
-     * scheduler switches away from it.
-     */
     tasks[0].id = 0;
     tasks[0].state = TASK_RUNNING;
     tasks[0].privilege = KERNEL_RING;
+    tasks[0].stack_base = 0x90000;
+    tasks[0].stack_size = 0x10000;
 
     active_tasks = 0;
 
@@ -99,16 +102,13 @@ int task_create_with_privilege(uint32_t privilege)
             tasks[i].state != TASK_TERMINATED)
             continue;
 
-        void *stack = kmalloc(TASK_STACK_SIZE);
-
-        if (stack == 0)
-            return -1;
-
         tasks[i].id = i;
         tasks[i].state = TASK_READY;
         tasks[i].privilege = privilege;
 
-        tasks[i].stack_base = (uint32_t)stack;
+        tasks[i].stack_base =
+            (uint32_t)&task_stacks[i][0];
+
         tasks[i].stack_size = TASK_STACK_SIZE;
 
         tasks[i].context.eax = 0;
@@ -119,10 +119,10 @@ int task_create_with_privilege(uint32_t privilege)
         tasks[i].context.edi = 0;
 
         tasks[i].context.esp =
-            (uint32_t)stack + TASK_STACK_SIZE;
+            tasks[i].stack_base + TASK_STACK_SIZE;
 
         tasks[i].context.ebp =
-            (uint32_t)stack + TASK_STACK_SIZE;
+            tasks[i].stack_base + TASK_STACK_SIZE;
 
         tasks[i].context.eip =
             (uint32_t)task_demo_entry;
@@ -130,12 +130,12 @@ int task_create_with_privilege(uint32_t privilege)
         tasks[i].context.eflags = 0x202;
 
         /*
-         * Day 24 performs actual switching only for
-         * kernel-ring tasks.
+         * Kernel-ring tasks participate in the current
+         * preemptive context-switch path.
          *
-         * Ring 3 tasks remain available as scheduler
-         * metadata until the user-mode stack/TSS path
-         * is completed.
+         * Ring-3 task execution remains a separate user-mode
+         * task milestone and is deliberately not mixed into
+         * this scheduler-core completion.
          */
         if (privilege == KERNEL_RING) {
             tasks[i].switch_esp =
@@ -150,7 +150,7 @@ int task_create_with_privilege(uint32_t privilege)
 
         active_tasks++;
 
-        return (int)tasks[i].id;
+        return (int)i;
     }
 
     return -1;
@@ -163,7 +163,7 @@ int task_create(void)
 
 int task_terminate(uint32_t id)
 {
-    if (id == 0)
+    if (id == 0 || id > MAX_TASKS)
         return -1;
 
     task_t *task = (task_t *)task_get(id);
@@ -183,6 +183,73 @@ int task_terminate(uint32_t id)
     return 0;
 }
 
+int task_block(uint32_t id)
+{
+    if (id == 0 || id > MAX_TASKS)
+        return -1;
+
+    task_t *task = (task_t *)task_get(id);
+
+    if (task == 0)
+        return -1;
+
+    if (task->state != TASK_READY &&
+        task->state != TASK_RUNNING)
+        return -1;
+
+    task->state = TASK_BLOCKED;
+    return 0;
+}
+
+int task_wake(uint32_t id)
+{
+    if (id > MAX_TASKS)
+        return -1;
+
+    task_t *task = (task_t *)task_get(id);
+
+    if (task == 0)
+        return -1;
+
+    if (task->state != TASK_BLOCKED)
+        return -1;
+
+    task->state = TASK_READY;
+    return 0;
+}
+
+extern uint32_t scheduler_current_task(void);
+
+int task_yield(void)
+{
+    uint32_t id = scheduler_current_task();
+
+    task_t *task = (task_t *)task_get(id);
+
+    if (task == 0)
+        return -1;
+
+    if (task->state != TASK_RUNNING)
+        return -1;
+
+    /*
+     * The next timer interrupt performs the actual switch.
+     */
+    task->state = TASK_READY;
+
+    return 0;
+}
+
+int task_exit(void)
+{
+    uint32_t id = scheduler_current_task();
+
+    if (id == 0)
+        return -1;
+
+    return task_terminate(id);
+}
+
 const task_t *task_get(uint32_t id)
 {
     if (id > MAX_TASKS)
@@ -197,4 +264,63 @@ const task_t *task_get(uint32_t id)
 uint32_t task_count(void)
 {
     return active_tasks;
+}
+
+int task_run_self_test(void)
+{
+    uint32_t before = active_tasks;
+
+    int first = task_create();
+    if (first < 0)
+        return 0;
+
+    int second = task_create();
+    if (second < 0) {
+        task_terminate((uint32_t)first);
+        return 0;
+    }
+
+    const task_t *a = task_get((uint32_t)first);
+    const task_t *b = task_get((uint32_t)second);
+
+    if (a == 0 || b == 0)
+        return 0;
+
+    if (a->stack_base == b->stack_base)
+        return 0;
+
+    if (a->stack_size != TASK_STACK_SIZE ||
+        b->stack_size != TASK_STACK_SIZE)
+        return 0;
+
+    if (a->state != TASK_READY ||
+        b->state != TASK_READY)
+        return 0;
+
+    if (a->switch_esp == 0 ||
+        b->switch_esp == 0)
+        return 0;
+
+    if (task_block((uint32_t)first) != 0)
+        return 0;
+
+    if (a->state != TASK_BLOCKED)
+        return 0;
+
+    if (task_wake((uint32_t)first) != 0)
+        return 0;
+
+    if (a->state != TASK_READY)
+        return 0;
+
+    if (task_terminate((uint32_t)first) != 0)
+        return 0;
+
+    if (task_terminate((uint32_t)second) != 0)
+        return 0;
+
+    if (active_tasks != before)
+        return 0;
+
+    return 1;
 }

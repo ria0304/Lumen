@@ -20,58 +20,72 @@ extern void kbd_init(void);
 
 volatile uint32_t timer_ticks = 0;
 
-void exception_handler(uint32_t vector)
+static void print_hex32(uint32_t value)
+{
+    const char hex[] = "0123456789ABCDEF";
+
+    terminal_write("0x");
+
+    for (int i = 7; i >= 0; i--) {
+        uint8_t digit =
+            (value >> (i * 4)) & 0xF;
+
+        terminal_putchar(hex[digit]);
+    }
+}
+
+void exception_handler(
+    uint32_t vector,
+    uint32_t error_code
+)
 {
     console_error("CPU EXCEPTION RECEIVED");
 
+    terminal_write("[ERROR] Vector: ");
+    print_hex32(vector);
+    terminal_putchar('\n');
+
+    terminal_write("[ERROR] Error code: ");
+    print_hex32(error_code);
+    terminal_putchar('\n');
+
+    if (vector == 14) {
+        uint32_t cr2;
+
+        __asm__ volatile (
+            "mov %%cr2, %0"
+            : "=r"(cr2)
+        );
+
+        terminal_write("[ERROR] Fault address: ");
+        print_hex32(cr2);
+        terminal_putchar('\n');
+    }
+
     switch (vector) {
-        case 0:
-            console_error("Exception 0: Divide by zero");
-            break;
-
-        case 1:
-            console_error("Exception 1: Debug");
-            break;
-
-        case 2:
-            console_error("Exception 2: Non-maskable interrupt");
-            break;
-
-        case 3:
-            console_error("Exception 3: Breakpoint");
-            break;
-
-        case 4:
-            console_error("Exception 4: Overflow");
-            break;
-
-        case 5:
-            console_error("Exception 5: Bound range exceeded");
-            break;
-
-        case 6:
-            console_error("Exception 6: Invalid opcode");
-            break;
-
-        case 7:
-            console_error("Exception 7: Device not available");
-            break;
-
-        case 8:
-            console_error("Exception 8: Double fault");
-            break;
-
-        case 13:
-            console_error("Exception 13: General protection fault");
-            break;
-
-        case 14:
-            console_error("Exception 14: Page fault");
-            break;
-
-        default:
-            console_error("Exception: Unhandled CPU exception");
-            break;
+        case 0:  console_error("Exception 0: Divide by zero"); break;
+        case 1:  console_error("Exception 1: Debug"); break;
+        case 2:  console_error("Exception 2: Non-maskable interrupt"); break;
+        case 3:  console_error("Exception 3: Breakpoint"); break;
+        case 4:  console_error("Exception 4: Overflow"); break;
+        case 5:  console_error("Exception 5: Bound range exceeded"); break;
+        case 6:  console_error("Exception 6: Invalid opcode"); break;
+        case 7:  console_error("Exception 7: Device not available"); break;
+        case 8:  console_error("Exception 8: Double fault"); break;
+        case 9:  console_error("Exception 9: Coprocessor segment overrun"); break;
+        case 10: console_error("Exception 10: Invalid TSS"); break;
+        case 11: console_error("Exception 11: Segment not present"); break;
+        case 12: console_error("Exception 12: Stack-segment fault"); break;
+        case 13: console_error("Exception 13: General protection fault"); break;
+        case 14: console_error("Exception 14: Page fault"); break;
+        case 15: console_error("Exception 15: Reserved"); break;
+        case 16: console_error("Exception 16: x87 floating-point"); break;
+        case 17: console_error("Exception 17: Alignment check"); break;
+        case 18: console_error("Exception 18: Machine check"); break;
+        case 19: console_error("Exception 19: SIMD floating-point"); break;
+        case 20: console_error("Exception 20: Virtualization"); break;
+        case 21: console_error("Exception 21: Control protection"); break;
+        default: console_error("Exception: Reserved/unknown CPU exception"); break;
     }
 
     console_error("System halted");
@@ -80,6 +94,15 @@ void exception_handler(uint32_t vector)
         __asm__ volatile ("cli");
         __asm__ volatile ("hlt");
     }
+}
+
+void irq_unhandled_handler(uint32_t irq)
+{
+    terminal_write("[WARN] Unhandled hardware IRQ: ");
+    print_hex32(irq);
+    terminal_putchar('\n');
+
+    pic_send_eoi((uint8_t)irq);
 }
 
 void timer_handler(void)
@@ -137,13 +160,31 @@ void kmain(void)
     tss_init();
     gdt_init();
     tss_load();
-    scheduler_init();
 
     console_info("Lumer kernel online!");
     console_info("VGA text driver: OK");
     console_info("Protected mode: 32-bit");
 
+    if (gdt_run_self_test()) {
+        console_info("GDT self-test: PASS");
+    } else {
+        console_error("GDT self-test: FAILED");
+    }
+
+    if (tss_run_self_test()) {
+        console_info("TSS self-test: PASS");
+    } else {
+        console_error("TSS self-test: FAILED");
+    }
+
     idt_init();
+
+    if (idt_run_self_test()) {
+        console_info("IDT self-test: PASS");
+    } else {
+        console_error("IDT self-test: FAILED");
+    }
+
     paging_init();
     frame_init();
 
@@ -169,6 +210,20 @@ void kmain(void)
     shell_init();
 
     task_init();
+
+    if (task_run_self_test()) {
+        console_info("Task manager self-test: PASS");
+    } else {
+        console_error("Task manager self-test: FAILED");
+    }
+
+    scheduler_init();
+
+    if (scheduler_run_self_test()) {
+        console_info("Scheduler self-test: PASS");
+    } else {
+        console_error("Scheduler self-test: FAILED");
+    }
 
     heap_init();
     console_info("Memory allocator: OK");

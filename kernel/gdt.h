@@ -4,5 +4,6 @@
 #include <stdint.h>
 
 void gdt_init(void);
+int gdt_run_self_test(void);
 
 #endif

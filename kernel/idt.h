@@ -17,5 +17,6 @@ struct idt_ptr {
 } __attribute__((packed));
 
 void idt_init(void);
+int idt_run_self_test(void);
 
 #endif

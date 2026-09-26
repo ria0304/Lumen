@@ -1,6 +1,8 @@
+#include <stdint.h>
 #include "gdt.h"
 #include "privilege.h"
 #include "tss.h"
+
 extern tss_t kernel_tss;
 
 struct gdt_entry {
@@ -83,4 +85,41 @@ void gdt_init(void)
     );
 
     gdt_flush((uint32_t)&gp);
+}
+
+int gdt_run_self_test(void)
+{
+    if (gp.limit != sizeof(gdt) - 1)
+        return 0;
+
+    if (gp.base != (uint32_t)&gdt)
+        return 0;
+
+    if (gdt[0].access != 0)
+        return 0;
+
+    if (gdt[1].access != 0x9A)
+        return 0;
+
+    if (gdt[2].access != 0x92)
+        return 0;
+
+    if (gdt[3].access != 0xFA)
+        return 0;
+
+    if (gdt[4].access != 0xF2)
+        return 0;
+
+    if (gdt[5].access != 0x89)
+        return 0;
+
+    uint32_t tss_base =
+        ((uint32_t)gdt[5].base_high << 24) |
+        ((uint32_t)gdt[5].base_middle << 16) |
+        gdt[5].base_low;
+
+    if (tss_base != (uint32_t)&kernel_tss)
+        return 0;
+
+    return 1;
 }

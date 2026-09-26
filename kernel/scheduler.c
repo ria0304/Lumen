@@ -21,10 +21,6 @@ static void save_task_context(
     task->context.esi = frame[1];
     task->context.ebp = frame[2];
 
-    /*
-     * frame[3] is the ESP value captured by PUSHA.
-     * The actual ESP before PUSHA is frame + 32.
-     */
     task->context.esp =
         (uint32_t)frame + 32;
 
@@ -51,19 +47,16 @@ static void scheduler_display(uint32_t id)
             ((uint16_t)0x07 << 8) | text[i];
     }
 
-    uint32_t value = id;
-
-    if (value < 10) {
+    if (id < 10) {
         vga[base + 8] =
             ((uint16_t)0x07 << 8) |
-            (uint8_t)('0' + value);
+            (uint8_t)('0' + id);
     }
 }
 
 void scheduler_init(void)
 {
     current_task_id = 0;
-
     console_info("Scheduler initialized: OK");
 }
 
@@ -75,42 +68,36 @@ uint32_t scheduler_current_task(void)
 uint32_t scheduler_next_task(void)
 {
     /*
-     * Search all task IDs after the current task.
+     * Round-robin search after current task.
      */
-    for (uint32_t id = current_task_id + 1;
-         id <= MAX_TASKS;
-         id++) {
+    for (uint32_t offset = 1;
+         offset <= MAX_TASKS + 1;
+         offset++) {
+
+        uint32_t id =
+            (current_task_id + offset) %
+            (MAX_TASKS + 1);
 
         const task_t *task = task_get(id);
 
-        if (task != 0 &&
-            task->state == TASK_READY &&
-            task->privilege == KERNEL_RING &&
-            task->switch_esp != 0) {
+        if (task == 0)
+            continue;
 
-            return id;
-        }
+        if (task->state != TASK_READY)
+            continue;
+
+        if (task->privilege != KERNEL_RING)
+            continue;
+
+        if (task->switch_esp == 0)
+            continue;
+
+        return id;
     }
 
     /*
-     * Wrap around.
+     * If no other task is ready, keep running current task.
      */
-    for (uint32_t id = 0;
-         id <= current_task_id &&
-         id <= MAX_TASKS;
-         id++) {
-
-        const task_t *task = task_get(id);
-
-        if (task != 0 &&
-            task->state == TASK_READY &&
-            task->privilege == KERNEL_RING &&
-            task->switch_esp != 0) {
-
-            return id;
-        }
-    }
-
     return current_task_id;
 }
 
@@ -145,28 +132,50 @@ void scheduler_tick(void)
 
 uint32_t scheduler_irq(uint32_t *frame)
 {
-    /*
-     * timer_handler updates the timer display and
-     * acknowledges the PIC before the context switch.
-     */
     timer_handler();
 
-    /*
-     * Save the context of the task that was interrupted.
-     */
     task_t *current =
         (task_t *)task_get(current_task_id);
 
-    if (current != 0)
-        save_task_context(current, frame);
+    if (current != 0) {
+        /*
+         * If the interrupted task is still active,
+         * save its exact interrupt frame.
+         */
+        if (current->state == TASK_RUNNING ||
+            current->state == TASK_READY) {
 
-    /*
-     * Select the next runnable task.
-     */
+            save_task_context(current, frame);
+        }
+    }
+
     uint32_t next = scheduler_next_task();
 
-    if (next == current_task_id)
+    if (next == current_task_id) {
+
+        /*
+         * A current task may have yielded, blocked, or
+         * terminated. If it is no longer runnable, try
+         * to recover by selecting task 0.
+         */
+        if (current != 0 &&
+            current->state != TASK_RUNNING) {
+
+            const task_t *idle = task_get(0);
+
+            if (idle != 0) {
+                task_t *mutable_idle =
+                    (task_t *)idle;
+
+                mutable_idle->state = TASK_RUNNING;
+                current_task_id = 0;
+
+                return (uint32_t)frame;
+            }
+        }
+
         return (uint32_t)frame;
+    }
 
     task_t *selected =
         (task_t *)task_get(next);
@@ -175,10 +184,6 @@ uint32_t scheduler_irq(uint32_t *frame)
         selected->switch_esp == 0)
         return (uint32_t)frame;
 
-    /*
-     * Current task becomes READY unless it has
-     * already been terminated.
-     */
     if (current != 0 &&
         current->state == TASK_RUNNING) {
 
@@ -190,14 +195,64 @@ uint32_t scheduler_irq(uint32_t *frame)
 
     scheduler_display(next);
 
-    /*
-     * IRQ0 will:
-     *
-     *   mov esp, returned_value
-     *   popa
-     *   iret
-     *
-     * This is the actual context switch.
-     */
     return selected->switch_esp;
+}
+
+int scheduler_run_self_test(void)
+{
+    uint32_t saved_current = current_task_id;
+
+    int first = task_create();
+    if (first < 0)
+        return 0;
+
+    int second = task_create();
+    if (second < 0) {
+        task_terminate((uint32_t)first);
+        return 0;
+    }
+
+    current_task_id = 0;
+
+    if (scheduler_next_task() != (uint32_t)first) {
+        task_terminate((uint32_t)first);
+        task_terminate((uint32_t)second);
+        current_task_id = saved_current;
+        return 0;
+    }
+
+    if (task_block((uint32_t)first) != 0) {
+        task_terminate((uint32_t)first);
+        task_terminate((uint32_t)second);
+        current_task_id = saved_current;
+        return 0;
+    }
+
+    if (scheduler_next_task() != (uint32_t)second) {
+        task_terminate((uint32_t)first);
+        task_terminate((uint32_t)second);
+        current_task_id = saved_current;
+        return 0;
+    }
+
+    if (task_wake((uint32_t)first) != 0) {
+        task_terminate((uint32_t)first);
+        task_terminate((uint32_t)second);
+        current_task_id = saved_current;
+        return 0;
+    }
+
+    if (scheduler_next_task() != (uint32_t)first) {
+        task_terminate((uint32_t)first);
+        task_terminate((uint32_t)second);
+        current_task_id = saved_current;
+        return 0;
+    }
+
+    task_terminate((uint32_t)first);
+    task_terminate((uint32_t)second);
+
+    current_task_id = saved_current;
+
+    return 1;
 }
