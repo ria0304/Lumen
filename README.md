@@ -327,10 +327,11 @@ class node_bios toneIndigo
   transition through the `int 0x80` gate works, but it does not read `eax` as a syscall number or
   dispatch anywhere; there is exactly one "syscall," and it does the same thing regardless of what
   the caller passed.
-- **Stray debug backups are sitting in the working tree.** `.ring3_backup_20260926_192703/` and
-  `.ring3_backup_20260926_192929/` are snapshots of several kernel files from mid-session debugging,
-  and neither directory is covered by `.gitignore`. They aren't referenced by the build and should
-  either be deleted or moved outside the repo before the next commit.
+- **`.gitignore` didn't cover the debug-backup directories.** `.ring3_backup_*/` snapshots made
+  during ring3 debugging sessions were previously untracked by `.gitignore` and had to be deleted by
+  hand. A `.ring3_backup_*/` wildcard entry is now in `.gitignore`, so future ones won't get staged
+  by accident — but there's nothing stopping a *differently-named* debug snapshot from doing the
+  same thing later. Worth a quick look before committing if you start backing up other files mid-session.
 - **`run.sh` is still an empty file.** Use `make run` or the direct QEMU invocation below.
 
 ---
@@ -414,9 +415,10 @@ Lumen/
 └── run.sh               QEMU launch script (still empty — use `make run`)
 ```
 
-`.ring3_backup_20260926_*/` directories currently also exist in the working tree; they are debug
-snapshots, not part of the build, and are not listed above — see
-[Known Limitations](#known-limitations).
+Timestamped `.ring3_backup_*/` snapshot directories show up here periodically during ring3
+debugging sessions. They've been deleted as of this revision and `.gitignore` now has a
+`.ring3_backup_*/` wildcard entry, so new ones won't get committed — see
+[Known Limitations](#known-limitations) for the caveat that a differently-named snapshot wouldn't be caught by that same rule.
 
 ---
 
