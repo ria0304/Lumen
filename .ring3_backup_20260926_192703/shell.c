@@ -1,11 +1,10 @@
 #include <stdint.h>
 #include "shell.h"
-#include "ring3.h"
 #include "console.h"
 #include "heap.h"
 #include "task.h"
 
-
+extern void enter_user_mode(void);
 
 extern volatile uint32_t timer_ticks;
 
@@ -176,12 +175,7 @@ void shell_handle_line(const char *line)
              line[7] == 'e' &&
              line[8] == '\0') {
         console_info("Entering user mode...");
-        if (!ring3_init()) {
-            console_error("Ring 3 initialization: FAIL");
-        } else {
-            console_info("Entering Ring 3...");
-            __asm__ volatile ("call enter_user_mode");
-        }
+        enter_user_mode();
     }
     else if (string_starts_with(line, "taskkill ")) {
         uint32_t id = shell_parse_uint(line + 9);

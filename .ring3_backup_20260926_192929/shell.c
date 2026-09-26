@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "shell.h"
 #include "ring3.h"
+extern void enter_user_mode(void);
 #include "console.h"
 #include "heap.h"
 #include "task.h"
