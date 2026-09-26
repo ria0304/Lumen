@@ -76,10 +76,13 @@ idt_load:
 isr%1:
     pusha
 
-    push dword 0
-    push dword %1
+    mov eax, esp
+    add eax, 32          ; eax -> EIP (no error code was pushed)
+    push eax              ; 3rd arg: frame
+    push dword 0            ; 2nd arg: error_code
+    push dword %1             ; 1st arg: vector
     call exception_handler
-    add esp, 8
+    add esp, 12
 
     popa
     iret
@@ -95,13 +98,16 @@ isr%1:
     pusha
 
     ; After PUSHA, the CPU error code is 32 bytes
-    ; above ESP.
-    mov eax, [esp + 32]
+    ; above ESP, and EIP is 4 bytes above that.
+    mov eax, esp
+    mov ebx, [eax + 32]     ; error_code
+    add eax, 36               ; eax -> EIP
 
-    push eax
-    push dword %1
+    push eax                    ; 3rd arg: frame
+    push ebx                      ; 2nd arg: error_code
+    push dword %1                   ; 1st arg: vector
     call exception_handler
-    add esp, 8
+    add esp, 12
 
     popa
 
@@ -158,10 +164,13 @@ ISR_NOERR 31
 isr_default:
     pusha
 
+    mov eax, esp
+    add eax, 32
+    push eax
     push dword 0
     push dword 255
     call exception_handler
-    add esp, 8
+    add esp, 12
 
     popa
     iret

@@ -12,6 +12,7 @@
 #include "line_editor.h"
 #include "shell.h"
 #include "task.h"
+#include "privilege.h"
 
 extern void kbd_init(void);
 
@@ -34,9 +35,17 @@ static void print_hex32(uint32_t value)
     }
 }
 
+static void task_fault_recover(void)
+{
+    for (;;) {
+        __asm__ volatile ("hlt");
+    }
+}
+
 void exception_handler(
     uint32_t vector,
-    uint32_t error_code
+    uint32_t error_code,
+    uint32_t *frame
 )
 {
     console_error("CPU EXCEPTION RECEIVED");
@@ -86,6 +95,57 @@ void exception_handler(
         case 20: console_error("Exception 20: Virtualization"); break;
         case 21: console_error("Exception 21: Control protection"); break;
         default: console_error("Exception: Reserved/unknown CPU exception"); break;
+    }
+
+    /*
+     * A fault from Ring 3 (CPL == 3 in the saved CS) is the
+     * misbehaving program's problem, not the kernel's. For a
+     * deliberately conservative set of recoverable vectors,
+     * terminate the current task (freeing its address space)
+     * and redirect the SAME interrupt frame this handler is
+     * about to return through into a trivial kernel-mode halt
+     * loop, instead of back into the faulting Ring 3 code. The
+     * next timer tick then schedules a different, still-healthy
+     * task away from it -- the same recovery path already used
+     * when a task yields, blocks, or exits normally. Genuine
+     * kernel-mode (Ring 0) faults are untouched by this and
+     * still halt exactly as before.
+     */
+    if ((frame[1] & 0x3U) == 0x3U) {
+
+        int recoverable =
+            (vector == 0)  ||
+            (vector == 4)  ||
+            (vector == 5)  ||
+            (vector == 6)  ||
+            (vector == 12) ||
+            (vector == 13) ||
+            (vector == 14);
+
+        if (recoverable) {
+
+            uint32_t id =
+                scheduler_current_task();
+
+            terminal_write(
+                "[ERROR] Ring 3 task faulted, terminating task: "
+            );
+            print_hex32(id);
+            terminal_putchar('\n');
+
+            task_terminate(id);
+
+            frame[0] =
+                (uint32_t)task_fault_recover;
+
+            frame[1] =
+                KERNEL_CODE_SELECTOR;
+
+            frame[2] |=
+                0x200U;
+
+            return;
+        }
     }
 
     console_error("System halted");
