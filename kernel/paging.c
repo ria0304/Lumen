@@ -3,9 +3,7 @@
 #include "console.h"
 
 /*
- * Day 25 paging configuration.
- *
- * Current memory layout:
+ * Current Lumer memory layout:
  *
  *   Kernel:          around 0x10000
  *   TSS stack:       0x90000
@@ -14,8 +12,10 @@
  *   Page directory:  0x220000
  *   Page table:      0x221000
  *
- * The first 4 MiB is identity mapped, so every currently used
- * kernel address remains valid after paging is enabled.
+ * Day 26 manages the existing first page table.
+ *
+ * This is deliberately limited to the first 4 MiB. A larger
+ * multi-directory address space can be added in a later day.
  */
 
 static uint32_t *page_directory =
@@ -56,6 +56,21 @@ static inline void write_cr3(uint32_t value)
         : "r"(value)
         : "memory"
     );
+}
+
+static inline void invalidate_page(uint32_t address)
+{
+    __asm__ volatile (
+        "invlpg (%0)"
+        :
+        : "r"(address)
+        : "memory"
+    );
+}
+
+static uint32_t page_index(uint32_t virtual_address)
+{
+    return (virtual_address >> 12) & 0x3FFU;
 }
 
 static void paging_clear_structures(void)
@@ -113,30 +128,189 @@ static int paging_verify_structures(void)
 
 static void paging_enable(void)
 {
-    /*
-     * CR3 must contain the physical address of the page directory.
-     */
     write_cr3(PAGE_DIRECTORY_ADDRESS);
 
-    /*
-     * Enable the paging bit in CR0.
-     */
     uint32_t cr0 = read_cr0();
 
     cr0 |= 0x80000000U;
 
     write_cr0(cr0);
 
-    /*
-     * MOV CR0 is serializing on x86. The following read confirms
-     * that the PG bit is set.
-     */
     cr0 = read_cr0();
 
     if ((cr0 & 0x80000000U) != 0)
         paging_enabled = 1;
     else
         paging_enabled = 0;
+}
+
+/*
+ * Map one 4 KiB page in the first 4 MiB address space.
+ *
+ * Both addresses must be page aligned.
+ */
+int paging_map_page(
+    uint32_t virtual_address,
+    uint32_t physical_address,
+    uint32_t flags
+)
+{
+    if ((virtual_address & (PAGE_SIZE - 1U)) != 0)
+        return -1;
+
+    if ((physical_address & (PAGE_SIZE - 1U)) != 0)
+        return -1;
+
+    /*
+     * Day 26 currently supports only the first page directory
+     * entry, which covers virtual addresses 0x00000000-0x003FFFFF.
+     */
+    if (virtual_address >= 0x00400000U)
+        return -1;
+
+    uint32_t index = page_index(virtual_address);
+
+    page_table[index] =
+        (physical_address & 0xFFFFF000U) |
+        (flags & 0xFFFU);
+
+    if (paging_enabled)
+        invalidate_page(virtual_address);
+
+    return 0;
+}
+
+/*
+ * Remove a 4 KiB mapping from the first page table.
+ */
+int paging_unmap_page(uint32_t virtual_address)
+{
+    if ((virtual_address & (PAGE_SIZE - 1U)) != 0)
+        return -1;
+
+    if (virtual_address >= 0x00400000U)
+        return -1;
+
+    uint32_t index = page_index(virtual_address);
+
+    page_table[index] = 0;
+
+    if (paging_enabled)
+        invalidate_page(virtual_address);
+
+    return 0;
+}
+
+/*
+ * Return the physical address corresponding to a virtual address,
+ * preserving the page offset.
+ *
+ * Returns 0xFFFFFFFF when the page is not mapped.
+ */
+uint32_t paging_get_mapping(uint32_t virtual_address)
+{
+    if (virtual_address >= 0x00400000U)
+        return 0xFFFFFFFFU;
+
+    uint32_t index = page_index(virtual_address);
+    uint32_t entry = page_table[index];
+
+    if ((entry & PAGE_PRESENT) == 0)
+        return 0xFFFFFFFFU;
+
+    return (entry & 0xFFFFF000U) |
+           (virtual_address & 0x00000FFFU);
+}
+
+int paging_is_mapped(uint32_t virtual_address)
+{
+    return paging_get_mapping(virtual_address) != 0xFFFFFFFFU;
+}
+
+static int paging_self_test(void)
+{
+    /*
+     * Check an existing identity mapping.
+     */
+    if (paging_get_mapping(0x00123000U) != 0x00123000U)
+        return 0;
+
+    /*
+     * Check another identity mapping.
+     */
+    if (!paging_is_mapped(0x003FF000U))
+        return 0;
+
+    /*
+     * Test remapping a page.
+     *
+     * Use 0x001FF000 because it is inside the existing identity
+     * region but is not currently needed by the kernel startup
+     * structures.
+     */
+    if (paging_map_page(
+            0x001FF000U,
+            0x001FE000U,
+            PAGE_PRESENT | PAGE_WRITE
+        ) != 0)
+        return 0;
+
+    if (paging_get_mapping(0x001FF000U) != 0x001FE000U)
+        return 0;
+
+    /*
+     * Restore the original identity mapping.
+     */
+    if (paging_map_page(
+            0x001FF000U,
+            0x001FF000U,
+            PAGE_PRESENT | PAGE_WRITE
+        ) != 0)
+        return 0;
+
+    if (paging_get_mapping(0x001FF000U) != 0x001FF000U)
+        return 0;
+
+    /*
+     * Test unmapping and remapping.
+     */
+    if (paging_unmap_page(0x001FE000U) != 0)
+        return 0;
+
+    if (paging_is_mapped(0x001FE000U))
+        return 0;
+
+    if (paging_map_page(
+            0x001FE000U,
+            0x001FE000U,
+            PAGE_PRESENT | PAGE_WRITE
+        ) != 0)
+        return 0;
+
+    if (!paging_is_mapped(0x001FE000U))
+        return 0;
+
+    /*
+     * Verify invalid alignment is rejected.
+     */
+    if (paging_map_page(
+            0x00123001U,
+            0x00200000U,
+            PAGE_PRESENT | PAGE_WRITE
+        ) == 0)
+        return 0;
+
+    /*
+     * Verify addresses beyond the first 4 MiB are rejected.
+     */
+    if (paging_map_page(
+            0x00400000U,
+            0x00400000U,
+            PAGE_PRESENT | PAGE_WRITE
+        ) == 0)
+        return 0;
+
+    return 1;
 }
 
 void paging_init(void)
@@ -160,11 +334,19 @@ void paging_init(void)
 
     paging_enable();
 
-    if (paging_enabled) {
-        console_info("Paging enabled: YES");
-    } else {
+    if (!paging_enabled) {
         console_info("Paging enabled: NO");
+        return;
     }
+
+    console_info("Paging enabled: YES");
+
+    if (!paging_self_test()) {
+        console_info("Paging management test: FAILED");
+        return;
+    }
+
+    console_info("Paging management test: PASS");
 }
 
 uint32_t paging_get_directory(void)
