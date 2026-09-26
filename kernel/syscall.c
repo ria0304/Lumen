@@ -1,48 +1,78 @@
 #include <stdint.h>
 
 #include "syscall.h"
+#include "task.h"
+#include "scheduler.h"
 #include "console.h"
 
-void syscall_handler(void)
+void syscall_handler(uint32_t *frame)
 {
-    uint32_t eax;
+    if (frame == 0)
+        return;
 
     /*
-     * isr_syscall uses PUSHA before entering C.
+     * PUSHA layout:
      *
-     * At this point the saved register frame is:
-     *
-     *   EDI
-     *   ESI
-     *   EBP
-     *   ESP
-     *   EBX
-     *   EDX
-     *   ECX
-     *   EAX
-     *
-     * syscall number is therefore the final PUSHA value.
-     *
-     * The current ISR does not pass the frame explicitly,
-     * so the first milestone only verifies that the syscall
-     * gate itself works.
+     * frame[0] = EDI
+     * frame[1] = ESI
+     * frame[2] = EBP
+     * frame[3] = ESP
+     * frame[4] = EBX
+     * frame[5] = EDX
+     * frame[6] = ECX
+     * frame[7] = EAX
      */
-    __asm__ volatile (
-        "mov %%eax, %0"
-        : "=r"(eax)
-    );
+    uint32_t syscall_number =
+        frame[7];
 
-    /*
-     * The user program intentionally executes:
-     *
-     *     mov eax, 1
-     *     int 0x80
-     *
-     * The exact EAX value is not yet part of the public
-     * syscall ABI; this milestone verifies Ring-3 entry
-     * and return through the DPL-3 IDT gate.
-     */
-    (void)eax;
+    switch (syscall_number) {
 
-    console_info("Ring 3 system call received: PASS");
+        case SYS_GETPID:
+        {
+            uint32_t id =
+                scheduler_current_task();
+
+            frame[7] = id;
+
+            terminal_write(
+                "[INFO] Syscall GETPID: task "
+            );
+
+            char digits[10];
+            int count = 0;
+            uint32_t value = id;
+
+            if (value == 0) {
+                terminal_putchar('0');
+            } else {
+                while (value > 0) {
+                    digits[count++] =
+                        '0' + (value % 10);
+                    value /= 10;
+                }
+
+                while (count > 0)
+                    terminal_putchar(
+                        digits[--count]
+                    );
+            }
+
+            terminal_putchar('\n');
+            break;
+        }
+
+        case SYS_YIELD:
+        {
+            frame[7] =
+                (task_yield() == 0) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
+        default:
+            frame[7] = 0xFFFFFFFFU;
+            console_error(
+                "Unknown system call"
+            );
+            break;
+    }
 }

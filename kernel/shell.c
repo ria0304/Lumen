@@ -11,6 +11,35 @@
 
 extern volatile uint32_t timer_ticks;
 
+/*
+ * Ring 3 VM protection test.
+ *
+ * 0x00001000 belongs to the kernel's supervisor-only
+ * identity mapping. Ring 3 must NOT be able to read it.
+ *
+ * mov eax, [0x1000]
+ * jmp $
+ */
+static const uint8_t vm_fault_program[] = {
+    0xA1, 0x00, 0x10, 0x00, 0x00,
+    0xEB, 0xFE
+};
+
+/*
+ * Ring 3 privilege protection test.
+ *
+ * CLI is a privileged instruction and must raise #GP
+ * when executed at CPL 3.
+ *
+ * cli
+ * jmp $
+ */
+static const uint8_t privilege_fault_program[] = {
+    0xFA,
+    0xEB, 0xFE
+};
+
+
 static void shell_prompt(void)
 {
     terminal_write("Lumer> ");
@@ -79,7 +108,8 @@ void shell_handle_line(const char *line)
         line[3] == 'p' &&
         line[4] == '\0') {
 
-        console_info("Commands: help, clear, echo, about, version, mem, uptime, task, taskkill, tasks");
+        console_info("Commands: help, clear, echo, about, version, mem, uptime, task, taskkill, tasks, taskuser");
+        console_info("Protection: vmtest, privtest");
         console_info("Filesystem: format, ls, cat <file>, write <file> <text>, rm <file>, run <file>");
     }
     else if (string_starts_with(line, "echo ")) {
@@ -167,6 +197,68 @@ void shell_handle_line(const char *line)
             terminal_putchar('\n');
         } else {
             console_error("User task creation failed");
+        }
+    }
+    else if (line[0] == 'v' &&
+             line[1] == 'm' &&
+             line[2] == 't' &&
+             line[3] == 'e' &&
+             line[4] == 's' &&
+             line[5] == 't' &&
+             line[6] == '\0') {
+
+        int id =
+            task_create_user_program(
+                vm_fault_program,
+                sizeof(vm_fault_program)
+            );
+
+        if (id >= 0) {
+            terminal_write(
+                "[INFO] VM protection test task: ID "
+            );
+            shell_print_uint((uint32_t)id);
+            terminal_putchar('\n');
+
+            console_info(
+                "Expected: Ring 3 page fault"
+            );
+        } else {
+            console_error(
+                "VM protection test creation failed"
+            );
+        }
+    }
+    else if (line[0] == 'p' &&
+             line[1] == 'r' &&
+             line[2] == 'i' &&
+             line[3] == 'v' &&
+             line[4] == 't' &&
+             line[5] == 'e' &&
+             line[6] == 's' &&
+             line[7] == 't' &&
+             line[8] == '\0') {
+
+        int id =
+            task_create_user_program(
+                privilege_fault_program,
+                sizeof(privilege_fault_program)
+            );
+
+        if (id >= 0) {
+            terminal_write(
+                "[INFO] Privilege protection test task: ID "
+            );
+            shell_print_uint((uint32_t)id);
+            terminal_putchar('\n');
+
+            console_info(
+                "Expected: Ring 3 general protection fault"
+            );
+        } else {
+            console_error(
+                "Privilege protection test creation failed"
+            );
         }
     }
     else if (line[0] == 'u' &&

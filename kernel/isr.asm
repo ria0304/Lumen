@@ -246,7 +246,12 @@ IRQ_DEFAULT 15
 isr_syscall:
     pusha
 
+; Pass the PUSHA frame to the C syscall dispatcher.
+; The dispatcher may modify saved registers, including EAX.
+    mov eax, esp
+    push eax
     call syscall_handler
+    add esp, 4
 
     popa
     iret

@@ -247,7 +247,10 @@ void kmain(void)
         console_error("IDT self-test: FAILED");
     }
 
-    paging_init();
+    /*
+     * The paging subsystem allocates dynamic page-table frames,
+     * so the physical frame allocator must be initialized first.
+     */
     frame_init();
 
     if (frame_run_self_test()) {
@@ -255,6 +258,8 @@ void kmain(void)
     } else {
         console_error("Frame allocator test: FAILED");
     }
+
+    paging_init();
 
     if (paging_run_self_test()) {
         console_info("Paging dynamic memory test: PASS");
