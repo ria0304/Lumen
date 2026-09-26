@@ -157,6 +157,156 @@ void task_init(void)
     console_info("Task manager initialized: OK");
 }
 
+/*
+ * Shared Ring 3 task setup: builds an isolated address space,
+ * copies 'code' (up to PAGE_SIZE bytes) into a dedicated code
+ * frame, gives it a dedicated zeroed stack frame, and prepares
+ * the interrupt-return frame that lands it in Ring 3 at
+ * TASK_RING3_CODE_VA. Used by both the fixed-demo path
+ * (task_create_with_privilege(USER_RING)) and the general
+ * loader path (task_create_user_program()) so there is exactly
+ * one place that gets this sequence right.
+ */
+static int task_create_ring3_with_code(
+    const uint8_t *code,
+    uint32_t code_size
+)
+{
+    if (code_size > PAGE_SIZE)
+        return -1;
+
+    uint32_t i;
+
+    for (i = 1; i <= MAX_TASKS; i++) {
+
+        if (tasks[i].state == TASK_UNUSED ||
+            tasks[i].state == TASK_TERMINATED)
+            break;
+    }
+
+    if (i > MAX_TASKS)
+        return -1;
+
+    tasks[i].id = i;
+    tasks[i].state = TASK_READY;
+    tasks[i].privilege = USER_RING;
+
+    tasks[i].stack_base = (uint32_t)&task_stacks[i][0];
+    tasks[i].stack_size = TASK_STACK_SIZE;
+
+    tasks[i].context.eax = 0;
+    tasks[i].context.ebx = 0;
+    tasks[i].context.ecx = 0;
+    tasks[i].context.edx = 0;
+    tasks[i].context.esi = 0;
+    tasks[i].context.edi = 0;
+    tasks[i].context.eflags = 0x202;
+
+    __asm__ volatile ("cli");
+
+    uint32_t directory = paging_create_address_space();
+
+    if (directory == FRAME_INVALID) {
+        console_error("User task: directory FAILED");
+        tasks[i].state = TASK_UNUSED;
+        __asm__ volatile ("sti");
+        return -1;
+    }
+
+    uint32_t code_phys = frame_alloc();
+
+    if (code_phys == FRAME_INVALID ||
+        code_phys >= PAGING_IDENTITY_LIMIT) {
+
+        if (code_phys != FRAME_INVALID)
+            frame_free(code_phys);
+
+        frame_free(directory);
+        console_error("User task: code frame FAILED");
+        tasks[i].state = TASK_UNUSED;
+        __asm__ volatile ("sti");
+        return -1;
+    }
+
+    uint8_t *code_dst = (uint8_t *)code_phys;
+
+    for (uint32_t k = 0; k < PAGE_SIZE; k++)
+        code_dst[k] = (k < code_size) ? code[k] : 0;
+
+    if (paging_map_in_directory(
+            directory,
+            TASK_RING3_CODE_VA,
+            code_phys,
+            PAGE_PRESENT | PAGE_USER
+        ) != 0) {
+
+        frame_free(code_phys);
+        frame_free(directory);
+        console_error("User task: code map FAILED");
+        tasks[i].state = TASK_UNUSED;
+        __asm__ volatile ("sti");
+        return -1;
+    }
+
+    uint32_t stack_phys = frame_alloc();
+
+    if (stack_phys == FRAME_INVALID ||
+        stack_phys >= PAGING_IDENTITY_LIMIT) {
+
+        if (stack_phys != FRAME_INVALID)
+            frame_free(stack_phys);
+
+        frame_free(code_phys);
+        frame_free(directory);
+        console_error("User task: stack frame FAILED");
+        tasks[i].state = TASK_UNUSED;
+        __asm__ volatile ("sti");
+        return -1;
+    }
+
+    uint8_t *stack_dst = (uint8_t *)stack_phys;
+
+    for (uint32_t k = 0; k < PAGE_SIZE; k++)
+        stack_dst[k] = 0;
+
+    if (paging_map_in_directory(
+            directory,
+            TASK_RING3_STACK_VA,
+            stack_phys,
+            PAGE_PRESENT | PAGE_WRITE | PAGE_USER
+        ) != 0) {
+
+        frame_free(stack_phys);
+        frame_free(code_phys);
+        frame_free(directory);
+        console_error("User task: stack map FAILED");
+        tasks[i].state = TASK_UNUSED;
+        __asm__ volatile ("sti");
+        return -1;
+    }
+
+    tasks[i].page_directory = directory;
+
+    tasks[i].switch_esp =
+        task_prepare_user_stack(
+            tasks[i].stack_base,
+            tasks[i].stack_size,
+            TASK_RING3_CODE_VA,
+            TASK_RING3_STACK_TOP
+        );
+
+    __asm__ volatile ("sti");
+
+    active_tasks++;
+
+    return (int)i;
+}
+
+int task_create_user_program(const uint8_t *code, uint32_t code_size)
+{
+    return task_create_ring3_with_code(code, code_size);
+}
+
 int task_create_with_privilege(uint32_t privilege)
 {
     if (privilege != KERNEL_RING &&
@@ -357,6 +507,22 @@ int task_terminate(uint32_t id)
         task->page_directory != PAGE_DIRECTORY_ADDRESS) {
 
         __asm__ volatile ("cli");
+
+        /*
+         * If this task's directory is the one currently loaded
+         * in CR3 -- true when a task is being terminated from
+         * inside its own fault handler, before the scheduler has
+         * had a chance to switch away from it -- get CR3 off of
+         * it FIRST. paging_destroy_address_space() frees the
+         * directory's physical frame; tearing down the directory
+         * that is still actively translating every memory access
+         * this very code is making is what used to crash the
+         * kernel immediately after printing the termination
+         * message.
+         */
+        if (paging_current_directory() == task->page_directory) {
+            paging_switch_directory(PAGE_DIRECTORY_ADDRESS);
+        }
 
         paging_destroy_address_space(
             task->page_directory

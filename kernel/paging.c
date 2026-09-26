@@ -712,9 +712,23 @@ void paging_destroy_address_space(
             }
 
             frame_free(table_phys);
-        }
 
-        dir[i] = 0;
+            /*
+             * Only clear the PDE for a table we actually just
+             * freed. A shared (kernel) entry must be left alone:
+             * if this directory is still the one loaded in CR3
+             * (true when a Ring 3 task is torn down from inside
+             * its own fault handler, before the scheduler has
+             * switched away from it), zeroing a shared entry
+             * unmaps the kernel code that is CURRENTLY RUNNING
+             * this loop out from under itself, which page-faults
+             * again immediately -- this time from Ring 0, which
+             * is unrecoverable. The whole directory frame is
+             * freed below regardless, so leaving a stale shared
+             * entry in place until then is harmless.
+             */
+            dir[i] = 0;
+        }
     }
 
     frame_free(directory_physical);

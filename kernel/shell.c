@@ -4,6 +4,8 @@
 #include "console.h"
 #include "heap.h"
 #include "task.h"
+#include "fs.h"
+#include "loader.h"
 
 
 
@@ -78,6 +80,7 @@ void shell_handle_line(const char *line)
         line[4] == '\0') {
 
         console_info("Commands: help, clear, echo, about, version, mem, uptime, task, taskkill, tasks");
+        console_info("Filesystem: format, ls, cat <file>, write <file> <text>, rm <file>, run <file>");
     }
     else if (string_starts_with(line, "echo ")) {
         terminal_write(line + 5);
@@ -222,6 +225,81 @@ void shell_handle_line(const char *line)
 
                 terminal_putchar('\n');
             }
+        }
+    }
+    else if (line[0] == 'f' &&
+             line[1] == 'o' &&
+             line[2] == 'r' &&
+             line[3] == 'm' &&
+             line[4] == 'a' &&
+             line[5] == 't' &&
+             line[6] == '\0') {
+        if (fs_format() == 0) {
+            console_info("Disk formatted");
+        } else {
+            console_error("Format failed (is a disk attached?)");
+        }
+    }
+    else if (line[0] == 'l' &&
+             line[1] == 's' &&
+             line[2] == '\0') {
+        fs_list();
+    }
+    else if (string_starts_with(line, "cat ")) {
+        const char *filename = line + 4;
+        char buffer[513];
+        int read = fs_read(filename, buffer, sizeof(buffer) - 1);
+
+        if (read < 0) {
+            console_error("No such file");
+        } else {
+            buffer[read] = '\0';
+            terminal_write(buffer);
+            terminal_putchar('\n');
+        }
+    }
+    else if (string_starts_with(line, "write ")) {
+        const char *rest = line + 6;
+        char filename[29];
+        int i = 0;
+
+        while (rest[i] != ' ' && rest[i] != '\0' && i < 28) {
+            filename[i] = rest[i];
+            i++;
+        }
+        filename[i] = '\0';
+
+        const char *text = (rest[i] == ' ') ? rest + i + 1 : rest + i;
+        int text_len = 0;
+
+        while (text[text_len] != '\0')
+            text_len++;
+
+        if (i == 0 || text_len == 0) {
+            console_error("Usage: write <file> <text>");
+        } else if (fs_write(filename, text, (uint32_t)text_len) == 0) {
+            console_info("File written");
+        } else {
+            console_error("Write failed (no disk, full, or too large)");
+        }
+    }
+    else if (string_starts_with(line, "rm ")) {
+        const char *filename = line + 3;
+
+        if (fs_delete(filename) == 0) {
+            console_info("File deleted");
+        } else {
+            console_error("No such file");
+        }
+    }
+    else if (string_starts_with(line, "run ")) {
+        const char *filename = line + 4;
+        int id = loader_spawn(filename);
+
+        if (id >= 0) {
+            terminal_write("[INFO] Spawned task ID ");
+            shell_print_uint((uint32_t)id);
+            terminal_putchar('\n');
         }
     }
     else {

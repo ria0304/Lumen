@@ -54,6 +54,16 @@ void task_init(void);
 int task_create(void);
 int task_create_with_privilege(uint32_t privilege);
 
+/*
+ * Creates a Ring 3 task whose code page is a copy of 'code'
+ * (up to PAGE_SIZE bytes -- one page, same limit the legacy
+ * 'taskuser' path already has). Used by the loader to run a
+ * program read from the filesystem instead of the fixed
+ * ring3_test_program. Returns the new task's id, or -1 if
+ * code_size exceeds a page or allocation fails.
+ */
+int task_create_user_program(const uint8_t *code, uint32_t code_size);
+
 int task_terminate(uint32_t id);
 int task_block(uint32_t id);
 int task_wake(uint32_t id);

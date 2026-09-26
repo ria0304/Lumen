@@ -23,8 +23,12 @@ start:
     mov es, ax
     xor bx, bx
 
+    ; Sector count is not derived from the build -- bump this (and
+    ; re-check it) any time kernel/build/kernel.bin grows close to
+    ; count * 512 bytes. 120 sectors = 60 KiB, comfortably above the
+    ; current ~36 KiB kernel with headroom for near-term growth.
     mov ah, 0x02
-    mov al, 56
+    mov al, 120
     mov ch, 0x00
     mov cl, 0x02
     mov dh, 0x00

@@ -13,6 +13,8 @@
 #include "shell.h"
 #include "task.h"
 #include "privilege.h"
+#include "ata.h"
+#include "fs.h"
 
 extern void kbd_init(void);
 
@@ -294,6 +296,13 @@ void kmain(void)
 
     heap_init();
     console_info("Memory allocator: OK");
+
+    ata_init();
+    fs_init();
+
+    if (!fs_is_mounted()) {
+        console_warn("FS: run 'format' to initialize the disk");
+    }
 
     if (heap_run_self_test()) {
         console_info("Heap self-test: PASS");
