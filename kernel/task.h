@@ -33,6 +33,14 @@ typedef struct {
     task_state_t state;
     uint32_t privilege;
 
+    /*
+     * Physical address of this task's page directory.
+     * Kernel-ring tasks share PAGE_DIRECTORY_ADDRESS (the
+     * single global kernel directory). Ring 3 tasks get their
+     * own, created by paging_create_address_space().
+     */
+    uint32_t page_directory;
+
     uint32_t stack_base;
     uint32_t stack_size;
 

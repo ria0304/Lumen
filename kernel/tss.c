@@ -50,6 +50,11 @@ void tss_init(void)
     kernel_tss.iomap_base = sizeof(tss_t);
 }
 
+void tss_set_esp0(uint32_t esp0)
+{
+    kernel_tss.esp0 = esp0;
+}
+
 int tss_run_self_test(void)
 {
     if (kernel_tss.esp0 == 0)

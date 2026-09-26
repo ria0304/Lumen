@@ -12,6 +12,8 @@ static uint32_t *const first_page_table =
 
 static volatile uint32_t paging_enabled;
 
+static uint32_t active_directory = PAGE_DIRECTORY_ADDRESS;
+
 static inline uint32_t read_cr0(void)
 {
     uint32_t value;
@@ -523,6 +525,219 @@ int paging_run_self_test(void)
     );
 
     return 1;
+}
+
+static int map_in_inactive_directory(
+    uint32_t dir_phys,
+    uint32_t vaddr,
+    uint32_t paddr,
+    uint32_t flags
+)
+{
+    if (dir_phys >= PAGING_IDENTITY_LIMIT)
+        return -1;
+
+    uint32_t *dir = (uint32_t *)dir_phys;
+    uint32_t di = pd_index(vaddr);
+
+    uint32_t *table;
+
+    if (dir[di] & PAGE_PRESENT) {
+
+        uint32_t table_phys =
+            dir[di] & 0xFFFFF000U;
+
+        if (table_phys >= PAGING_IDENTITY_LIMIT)
+            return -1;
+
+        table = (uint32_t *)table_phys;
+
+    } else {
+
+        uint32_t table_phys =
+            frame_alloc();
+
+        if (table_phys == FRAME_INVALID ||
+            table_phys >= PAGING_IDENTITY_LIMIT)
+            return -1;
+
+        table = (uint32_t *)table_phys;
+
+        for (uint32_t i = 0;
+             i < PAGE_ENTRIES;
+             ++i) {
+
+            table[i] = 0;
+        }
+
+        dir[di] =
+            table_phys |
+            PAGE_PRESENT |
+            PAGE_WRITE |
+            PAGE_USER;
+    }
+
+    uint32_t ti = pt_index(vaddr);
+
+    table[ti] =
+        (paddr & 0xFFFFF000U) |
+        (flags & 0xFFFU) |
+        PAGE_PRESENT;
+
+    return 0;
+}
+
+/*
+ * Allocate a fresh page directory and populate it with the same
+ * kernel-space entries as the master directory (identity map,
+ * heap, anything else already present). Those entries are shared
+ * BY REFERENCE (same page table frame), not deep-copied -- future
+ * kernel-space growth (e.g. the heap) stays visible automatically.
+ * Only entries a task adds itself afterwards are private to it.
+ */
+uint32_t paging_create_address_space(void)
+{
+    uint32_t dir_phys =
+        frame_alloc();
+
+    if (dir_phys == FRAME_INVALID)
+        return FRAME_INVALID;
+
+    if (dir_phys >= PAGING_IDENTITY_LIMIT) {
+        console_error(
+            "Address space: directory frame out of range"
+        );
+        frame_free(dir_phys);
+        return FRAME_INVALID;
+    }
+
+    uint32_t *dir =
+        (uint32_t *)dir_phys;
+
+    for (uint32_t i = 0;
+         i < PAGE_ENTRIES;
+         ++i) {
+
+        dir[i] = page_directory[i];
+    }
+
+    return dir_phys;
+}
+
+/*
+ * Map one page inside a directory that is NOT necessarily the
+ * currently active one. Used to build a Ring 3 task's private
+ * mappings before that task ever runs (and therefore before CR3
+ * ever points at its directory).
+ */
+int paging_map_in_directory(
+    uint32_t directory_physical,
+    uint32_t virtual_address,
+    uint32_t physical_address,
+    uint32_t flags
+)
+{
+    if ((virtual_address &
+         (PAGE_SIZE - 1U)) != 0)
+        return -1;
+
+    if ((physical_address &
+         (PAGE_SIZE - 1U)) != 0)
+        return -1;
+
+    return map_in_inactive_directory(
+        directory_physical,
+        virtual_address,
+        physical_address,
+        flags
+    );
+}
+
+/*
+ * Free every frame private to this address space (page tables
+ * and the pages they map that are NOT shared with the master
+ * kernel directory), then free the directory itself. Shared
+ * (kernel-space) entries are left completely untouched.
+ */
+void paging_destroy_address_space(
+    uint32_t directory_physical
+)
+{
+    if (directory_physical == 0 ||
+        directory_physical == PAGE_DIRECTORY_ADDRESS ||
+        directory_physical >= PAGING_IDENTITY_LIMIT)
+        return;
+
+    uint32_t *dir =
+        (uint32_t *)directory_physical;
+
+    for (uint32_t i = 0;
+         i < PAGE_ENTRIES;
+         ++i) {
+
+        uint32_t entry = dir[i];
+
+        if (!(entry & PAGE_PRESENT)) {
+            continue;
+        }
+
+        uint32_t table_phys =
+            entry & 0xFFFFF000U;
+
+        uint32_t master_entry =
+            page_directory[i];
+
+        uint32_t master_table_phys =
+            master_entry & 0xFFFFF000U;
+
+        int private_table =
+            !(master_entry & PAGE_PRESENT) ||
+            (table_phys != master_table_phys);
+
+        if (private_table &&
+            table_phys < PAGING_IDENTITY_LIMIT) {
+
+            uint32_t *table =
+                (uint32_t *)table_phys;
+
+            for (uint32_t j = 0;
+                 j < PAGE_ENTRIES;
+                 ++j) {
+
+                if (table[j] & PAGE_PRESENT) {
+                    frame_free(
+                        table[j] & 0xFFFFF000U
+                    );
+                }
+            }
+
+            frame_free(table_phys);
+        }
+
+        dir[i] = 0;
+    }
+
+    frame_free(directory_physical);
+}
+
+void paging_switch_directory(
+    uint32_t directory_physical
+)
+{
+    if (directory_physical == 0)
+        directory_physical = PAGE_DIRECTORY_ADDRESS;
+
+    if (directory_physical == active_directory)
+        return;
+
+    write_cr3(directory_physical);
+
+    active_directory = directory_physical;
+}
+
+uint32_t paging_current_directory(void)
+{
+    return active_directory;
 }
 
 void paging_init(void)

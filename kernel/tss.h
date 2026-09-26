@@ -37,6 +37,7 @@ extern tss_t kernel_tss;
 
 void tss_init(void);
 void tss_load(void);
+void tss_set_esp0(uint32_t esp0);
 int tss_run_self_test(void);
 
 #endif

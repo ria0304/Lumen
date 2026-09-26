@@ -72,4 +72,33 @@ uint32_t paging_directory_entries_used(void);
 
 int paging_run_self_test(void);
 
+/*
+ * Per-address-space support: each Ring 3 task gets its own page
+ * directory, created by paging_create_address_space() and
+ * populated via paging_map_in_directory() *without* switching
+ * CR3 to it first (safe only because the new directory's frame
+ * is guaranteed to sit below PAGING_IDENTITY_LIMIT, so it can be
+ * written to directly through the boot identity map).
+ */
+#define PAGING_IDENTITY_LIMIT 0x00400000U
+
+uint32_t paging_create_address_space(void);
+
+int paging_map_in_directory(
+    uint32_t directory_physical,
+    uint32_t virtual_address,
+    uint32_t physical_address,
+    uint32_t flags
+);
+
+void paging_destroy_address_space(
+    uint32_t directory_physical
+);
+
+void paging_switch_directory(
+    uint32_t directory_physical
+);
+
+uint32_t paging_current_directory(void);
+
 #endif

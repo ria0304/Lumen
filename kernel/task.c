@@ -1,15 +1,21 @@
 #include <stdint.h>
 #include "task.h"
 #include "console.h"
+#include "frame.h"
+#include "paging.h"
+#include "ring3.h"
 
 extern void task_demo_entry(void);
 
 static task_t tasks[MAX_TASKS + 1];
 
 /*
- * Fixed kernel stacks live in BSS instead of consuming the
- * small bump heap. This gives every kernel task a permanent
- * 4 KiB stack and allows terminated task slots to be reused.
+ * Fixed kernel stacks live in BSS. Every task, kernel-ring or
+ * user-ring, gets a permanently dedicated 4 KiB stack here. For
+ * Ring 3 tasks this doubles as the TSS.esp0 target while that
+ * task is current -- each task's interrupt/syscall entry frame
+ * lands on ITS OWN stack, never aliasing task 0's or any other
+ * task's.
  */
 static uint8_t task_stacks[MAX_TASKS + 1][TASK_STACK_SIZE]
     __attribute__((aligned(16)));
@@ -56,12 +62,65 @@ static uint32_t task_prepare_stack(
     return (uint32_t)sp;
 }
 
+/*
+ * Same idea, but for a Ring 3 task's FIRST entry. IRET detects
+ * that the CS being restored (USER_CODE_SELECTOR, RPL=3) differs
+ * from the current CPL and automatically pops the extra ESP/SS
+ * pair too, performing the Ring 0 -> Ring 3 transition. No
+ * special-cased assembly is needed for this -- the existing
+ * irq0 popa/iret path in isr.asm handles both frame shapes.
+ *
+ * Final layout:
+ *
+ * EDI
+ * ESI
+ * EBP
+ * ESP dummy
+ * EBX
+ * EDX
+ * ECX
+ * EAX
+ * EIP
+ * CS
+ * EFLAGS
+ * ESP (user)
+ * SS  (user)
+ */
+static uint32_t task_prepare_user_stack(
+    uint32_t stack_base,
+    uint32_t stack_size,
+    uint32_t entry,
+    uint32_t user_esp
+)
+{
+    uint32_t *sp =
+        (uint32_t *)(stack_base + stack_size);
+
+    *--sp = USER_DATA_SELECTOR;
+    *--sp = user_esp;
+    *--sp = 0x00000202;
+    *--sp = USER_CODE_SELECTOR;
+    *--sp = entry;
+
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+
+    return (uint32_t)sp;
+}
+
 void task_init(void)
 {
     for (uint32_t i = 0; i <= MAX_TASKS; i++) {
         tasks[i].id = 0;
         tasks[i].state = TASK_UNUSED;
         tasks[i].privilege = KERNEL_RING;
+        tasks[i].page_directory = PAGE_DIRECTORY_ADDRESS;
 
         tasks[i].stack_base = 0;
         tasks[i].stack_size = 0;
@@ -79,9 +138,17 @@ void task_init(void)
         tasks[i].context.eflags = 0x202;
     }
 
+    /*
+     * Task 0 represents the kernel/shell execution context.
+     * It never faults from Ring 3, so its own stack_base/size
+     * (and whatever TSS.esp0 happens to hold while it runs) are
+     * never actually used by hardware -- they only matter for
+     * tasks that DO take a privilege-changing interrupt.
+     */
     tasks[0].id = 0;
     tasks[0].state = TASK_RUNNING;
     tasks[0].privilege = KERNEL_RING;
+    tasks[0].page_directory = PAGE_DIRECTORY_ADDRESS;
     tasks[0].stack_base = 0x90000;
     tasks[0].stack_size = 0x10000;
 
@@ -105,6 +172,7 @@ int task_create_with_privilege(uint32_t privilege)
         tasks[i].id = i;
         tasks[i].state = TASK_READY;
         tasks[i].privilege = privilege;
+        tasks[i].page_directory = PAGE_DIRECTORY_ADDRESS;
 
         tasks[i].stack_base =
             (uint32_t)&task_stacks[i][0];
@@ -129,23 +197,133 @@ int task_create_with_privilege(uint32_t privilege)
 
         tasks[i].context.eflags = 0x202;
 
-        /*
-         * Kernel-ring tasks participate in the current
-         * preemptive context-switch path.
-         *
-         * Ring-3 task execution remains a separate user-mode
-         * task milestone and is deliberately not mixed into
-         * this scheduler-core completion.
-         */
         if (privilege == KERNEL_RING) {
+
             tasks[i].switch_esp =
                 task_prepare_stack(
                     tasks[i].stack_base,
                     tasks[i].stack_size,
                     (uint32_t)task_demo_entry
                 );
+
         } else {
-            tasks[i].switch_esp = 0;
+
+            __asm__ volatile ("cli");
+
+            /*
+             * Build a dedicated, isolated address space: its
+             * own page directory, its own physical code/stack
+             * frames, mapped only inside that directory. If
+             * anything here fails, unwind everything already
+             * allocated and refuse to create the task rather
+             * than leave it half-built.
+             */
+            uint32_t directory =
+                paging_create_address_space();
+
+            if (directory == FRAME_INVALID) {
+                console_error("Ring 3 task: directory FAILED");
+                tasks[i].state = TASK_UNUSED;
+                __asm__ volatile ("sti");
+                return -1;
+            }
+
+            uint32_t code_phys =
+                frame_alloc();
+
+            if (code_phys == FRAME_INVALID ||
+                code_phys >= PAGING_IDENTITY_LIMIT) {
+
+                if (code_phys != FRAME_INVALID)
+                    frame_free(code_phys);
+
+                frame_free(directory);
+                console_error("Ring 3 task: code frame FAILED");
+                tasks[i].state = TASK_UNUSED;
+                __asm__ volatile ("sti");
+                return -1;
+            }
+
+            uint8_t *code_dst =
+                (uint8_t *)code_phys;
+
+            for (uint32_t k = 0;
+                 k < ring3_test_program_size;
+                 k++) {
+
+                code_dst[k] =
+                    ring3_test_program[k];
+            }
+
+            if (paging_map_in_directory(
+                    directory,
+                    TASK_RING3_CODE_VA,
+                    code_phys,
+                    PAGE_PRESENT | PAGE_USER
+                ) != 0) {
+
+                frame_free(code_phys);
+                frame_free(directory);
+                console_error("Ring 3 task: code map FAILED");
+                tasks[i].state = TASK_UNUSED;
+                __asm__ volatile ("sti");
+                return -1;
+            }
+
+            uint32_t stack_phys =
+                frame_alloc();
+
+            if (stack_phys == FRAME_INVALID ||
+                stack_phys >= PAGING_IDENTITY_LIMIT) {
+
+                if (stack_phys != FRAME_INVALID)
+                    frame_free(stack_phys);
+
+                frame_free(code_phys);
+                frame_free(directory);
+                console_error("Ring 3 task: stack frame FAILED");
+                tasks[i].state = TASK_UNUSED;
+                __asm__ volatile ("sti");
+                return -1;
+            }
+
+            uint8_t *stack_dst =
+                (uint8_t *)stack_phys;
+
+            for (uint32_t k = 0;
+                 k < PAGE_SIZE;
+                 k++) {
+
+                stack_dst[k] = 0;
+            }
+
+            if (paging_map_in_directory(
+                    directory,
+                    TASK_RING3_STACK_VA,
+                    stack_phys,
+                    PAGE_PRESENT | PAGE_WRITE | PAGE_USER
+                ) != 0) {
+
+                frame_free(stack_phys);
+                frame_free(code_phys);
+                frame_free(directory);
+                console_error("Ring 3 task: stack map FAILED");
+                tasks[i].state = TASK_UNUSED;
+                __asm__ volatile ("sti");
+                return -1;
+            }
+
+            tasks[i].page_directory = directory;
+
+            tasks[i].switch_esp =
+                task_prepare_user_stack(
+                    tasks[i].stack_base,
+                    tasks[i].stack_size,
+                    TASK_RING3_CODE_VA,
+                    TASK_RING3_STACK_TOP
+                );
+
+            __asm__ volatile ("sti");
         }
 
         active_tasks++;
@@ -174,6 +352,20 @@ int task_terminate(uint32_t id)
     if (task->state == TASK_UNUSED ||
         task->state == TASK_TERMINATED)
         return -1;
+
+    if (task->privilege == USER_RING &&
+        task->page_directory != PAGE_DIRECTORY_ADDRESS) {
+
+        __asm__ volatile ("cli");
+
+        paging_destroy_address_space(
+            task->page_directory
+        );
+
+        task->page_directory = PAGE_DIRECTORY_ADDRESS;
+
+        __asm__ volatile ("sti");
+    }
 
     task->state = TASK_TERMINATED;
 

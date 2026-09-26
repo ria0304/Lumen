@@ -2,6 +2,8 @@
 #include "scheduler.h"
 #include "task.h"
 #include "console.h"
+#include "tss.h"
+#include "paging.h"
 
 extern void timer_handler(void);
 
@@ -54,6 +56,27 @@ static void scheduler_display(uint32_t id)
     }
 }
 
+/*
+ * Point TSS.esp0 and CR3 at the task that is about to become
+ * current. esp0 matters only for tasks that can take a
+ * privilege-changing interrupt (Ring 3 tasks); for kernel-ring
+ * tasks the value is simply unused by hardware. CR3 matters for
+ * every task with its own address space.
+ */
+static void scheduler_activate(task_t *task)
+{
+    if (task == 0)
+        return;
+
+    tss_set_esp0(
+        task->stack_base + task->stack_size
+    );
+
+    paging_switch_directory(
+        task->page_directory
+    );
+}
+
 void scheduler_init(void)
 {
     current_task_id = 0;
@@ -68,7 +91,9 @@ uint32_t scheduler_current_task(void)
 uint32_t scheduler_next_task(void)
 {
     /*
-     * Round-robin search after current task.
+     * Round-robin search after current task. Ring 3 tasks are
+     * now first-class schedulable entities, same as kernel-ring
+     * ones.
      */
     for (uint32_t offset = 1;
          offset <= MAX_TASKS + 1;
@@ -84,9 +109,6 @@ uint32_t scheduler_next_task(void)
             continue;
 
         if (task->state != TASK_READY)
-            continue;
-
-        if (task->privilege != KERNEL_RING)
             continue;
 
         if (task->switch_esp == 0)
@@ -126,6 +148,7 @@ void scheduler_tick(void)
         selected->state = TASK_RUNNING;
         current_task_id = next;
 
+        scheduler_activate(selected);
         scheduler_display(next);
     }
 }
@@ -170,6 +193,8 @@ uint32_t scheduler_irq(uint32_t *frame)
                 mutable_idle->state = TASK_RUNNING;
                 current_task_id = 0;
 
+                scheduler_activate(mutable_idle);
+
                 return (uint32_t)frame;
             }
         }
@@ -193,6 +218,7 @@ uint32_t scheduler_irq(uint32_t *frame)
     selected->state = TASK_RUNNING;
     current_task_id = next;
 
+    scheduler_activate(selected);
     scheduler_display(next);
 
     return selected->switch_esp;
