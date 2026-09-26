@@ -11,8 +11,9 @@
 **A 32-bit x86 operating system, built from a raw boot sector up.**
 
 Lumen is written in C and assembly, with a custom BIOS boot sector and a freestanding C kernel.
-It is developed and tested exclusively under QEMU. A physical memory allocator, filesystem,
-multitasking, and a shell are planned but not yet implemented.
+It is developed and tested exclusively under QEMU. Paging, a physical frame allocator, a
+free-list heap, preemptive multitasking, Ring 3 user mode, and a basic system call gate are all
+implemented. A filesystem and disk driver are not.
 
 </div>
 
@@ -20,11 +21,14 @@ multitasking, and a shell are planned but not yet implemented.
 
 ## Status
 
-**Early development.** The system boots from a raw disk image, enters protected mode, transfers
-control to a C kernel, and now has a working interrupt pipeline: CPU exceptions, a remapped PIC,
-a PIT timer driving IRQ0, and a keyboard driver driving IRQ1 with shift-key support. A first-pass
-bump allocator (`kmalloc`) is also in place. See [Current State](#current-state) for the honest
-breakdown.
+**Active development, past the "bring-up" stage.** The system boots from a raw disk image,
+enters protected mode, and transfers control to a C kernel that brings up a full IDT (all 32
+exception vectors, all 16 IRQ vectors, and a DPL-3 syscall gate at `int 0x80`), a GDT with a TSS,
+paging with per-task address spaces, a bitmap frame allocator, a free-list heap with `kfree`, a
+round-robin preemptive scheduler that runs both Ring 0 and Ring 3 tasks, and an interactive shell.
+Every subsystem below runs a self-test at boot and prints PASS/FAIL to the screen before the
+kernel drops into its idle loop. See [Current State](#current-state) for the honest breakdown, and
+[Known Limitations](#known-limitations) for what will bite you first.
 
 ---
 
@@ -48,18 +52,25 @@ breakdown.
 
 | Component | Status | Notes |
 |---|---|---|
-| Boot sector (real mode to protected mode) | Implemented | Loads kernel, enables A20, loads GDT, switches mode |
+| Boot sector (real mode to protected mode) | Implemented | Loads the kernel, enables A20, loads the GDT, switches mode. Now reads 56 sectors (28 KiB), up from the original 8 — see [Known Limitations](#known-limitations) for how much of that margin is left |
 | Kernel entry point | Implemented | Assembly stub sets the stack and calls `kmain()` |
-| GDT | Implemented | Flat code and data segments, defined in the boot sector |
-| VGA text output | Partial | Direct writes in `kmain()`; `terminal_putchar()` handles `\n` and `\b` (backspace erases the previous cell), but there is still no cursor or scrolling — output wraps to row 0 when it runs off the bottom |
-| IDT and exception handlers | Partial | `idt_init()` (`kernel/idt.c`) populates gates for vector 0 (divide-by-zero), vector 3 (breakpoint), vector 32 (IRQ0/timer), and vector 33 (IRQ1/keyboard). The remaining 252 entries are left null. `kmain()` self-tests by executing `int $3` right after `idt_init()` runs |
-| PIC remapping | Implemented | `pic_init()` (`kernel/pic.c`) remaps IRQ 0-7 to vectors 32-39 and IRQ 8-15 to 40-47, then explicitly masks every line except IRQ0 and IRQ1 rather than trusting whatever mask the BIOS left behind. `pic_send_eoi()` is called from both the timer and keyboard handlers |
-| PIT timer | Implemented | `pit_init()` (`kernel/pit.c`) programs channel 0 for a configurable frequency; `kmain()` calls it at 100 Hz. `timer_handler()` in `kernel.c` increments a tick counter and renders the low 16 bits as hex in the top-right of the screen on every tick, plus an elapsed-seconds readout |
-| Keyboard driver | Implemented | `kbd_handler()` (`kernel/keyboard.c`) reads scancodes from IRQ1, tracks left/right Shift via make/break codes, and maps to ASCII through separate unshifted and shifted US layout tables. Backspace is forwarded to `terminal_putchar()`. No caps lock, extended (0xE0-prefixed) scancodes, or non-US layouts yet |
-| Physical memory allocator | Partial | `kernel/heap.c` is a bump allocator: `kmalloc()` hands out 4-byte-aligned chunks from a fixed 64 KiB region starting at `0x200000` and never frees. No `kfree`, no page-level allocator, no fragmentation handling |
+| GDT | Implemented | `gdt_init()` (`kernel/gdt.c`) builds flat kernel code/data segments plus Ring 3 code/data descriptors and a TSS descriptor; `gdt_run_self_test()` checks it at boot |
+| TSS | Implemented | `kernel/tss.c` / `tss_load.asm` load a single hardware TSS used for the Ring 3 -> Ring 0 stack switch on interrupt/syscall entry; `tss_set_esp0()` is repointed per-task by the scheduler |
+| VGA text output | Implemented | `kernel/console.c` scrolls the screen when it fills, moves the hardware text cursor via ports `0x3D4`/`0x3D5`, and exposes `console_info` / `console_warn` / `console_error` on top of raw `terminal_write` / `terminal_putchar` |
+| IDT and exception handlers | Implemented | `idt_init()` (`kernel/idt.c`) populates all 32 CPU exception vectors, all 16 remapped IRQ vectors, and a DPL-3 gate at vector `0x80` for syscalls. `exception_handler()` in `kernel.c` decodes and prints every vector by name and, for page faults, reads and prints `CR2` |
+| PIC remapping | Implemented | `pic_init()` (`kernel/pic.c`) remaps IRQ 0-7 to vectors 32-39 and IRQ 8-15 to 40-47, masks every line except IRQ0/IRQ1 at boot, and unmasks others only as their handlers are wired up |
+| PIT timer | Implemented | `pit_init(100)` drives IRQ0 at 100 Hz. The handler now also feeds the scheduler (`scheduler_irq()`) on every tick, so the timer is the preemption source, not just a clock |
+| Keyboard driver | Implemented | `kbd_handler()` tracks Shift and feeds ASCII into the line editor. Still no Caps Lock or extended (`0xE0`-prefixed) scancodes |
+| Line editor / shell | Implemented | `kernel/line_editor.c` buffers a line with backspace support; `kernel/shell.c` parses it and runs one of `help`, `clear`, `echo`, `about`, `version`, `mem`, `uptime`, `task`, `taskuser`, `taskkill`, `tasks`, `usermode` |
+| Paging | Implemented | `kernel/paging.c` sets up the master kernel page directory, supports mapping/unmapping/querying individual pages, and — the significant addition — `paging_create_address_space()` / `paging_map_in_directory()` / `paging_switch_directory()` give **each Ring 3 task its own page directory**, switched on every context switch |
+| Physical frame allocator | Implemented | `kernel/frame.c` is a bitmap allocator (`frame_alloc` / `frame_free`) over the first 16 MiB of physical RAM (`FRAME_MEMORY_LIMIT`), independent of and layered under the heap |
+| Kernel heap | Implemented | `kernel/heap.c` has grown from a bump allocator into a real free-list allocator: `kmalloc()` splits blocks, `kfree()` exists and coalesces. It is **not** interrupt-safe (see [Known Limitations](#known-limitations)) |
+| Tasks and scheduler | Implemented | `kernel/task.c` supports up to `MAX_TASKS` (16) tasks in Ring 0 or Ring 3, each with its own stack and (for Ring 3) address space. `kernel/scheduler.c` is a round-robin preemptive scheduler driven off the PIT tick, with `task_yield`, `task_block`, `task_wake`, `task_exit`/`task_terminate` |
+| Ring 3 / user mode | Implemented | `kernel/ring3.c` and `usermode.asm` map a tiny hand-assembled user program (`mov eax,1` / `int 0x80` / `jmp $`) into user-accessible pages and enter it via `enter_user_mode`; reachable through both the legacy `usermode` shell command and per-task `taskuser` |
+| System calls | Minimal | `kernel/syscall.c`'s `syscall_handler()` confirms the DPL-3 gate and Ring 3 entry/return work (it prints a PASS line) but does not yet read `eax` as a real syscall number or dispatch to a table — there is exactly one "syscall" |
+| Fault isolation | Implemented | A Ring 3 task that faults with a recoverable vector (divide-by-zero, GPF, page fault, etc.) is terminated by `exception_handler()` and the CPU is redirected into a kernel halt loop instead of crashing the whole machine; a Ring 0 fault still halts everything |
 | Filesystem | Not started | |
-| Processes and multitasking | Not started | |
-| Shell and userland utilities | Not started | |
+| Disk driver | Not started | The boot sector's own CHS read is the only disk I/O in the project |
 | Graphical interface | Not planned yet | Stretch goal |
 
 ---
@@ -67,21 +78,24 @@ breakdown.
 ## Boot Sequence
 
 1. The BIOS loads the 512-byte boot sector (`boot/boot.asm`) to `0x7C00`.
-2. The boot sector reads 8 sectors (4 KiB) containing the kernel to physical address `0x10000`
-   via CHS `int 0x13`. This is a fixed read count, not a measurement of the current kernel's
-   size — see [Known Limitations](#known-limitations).
+2. The boot sector reads 56 sectors (28 KiB) containing the kernel to physical address `0x10000`
+   via CHS `int 0x13`. This is still a fixed read count, not a measurement of the current kernel's
+   size — see [Known Limitations](#known-limitations) for how close that number already is to the
+   actual kernel image.
 3. It enables the A20 line using the fast method (port `0x92`), loads the GDT, and sets the PE bit
    in `CR0`.
 4. A far jump into the 32-bit code segment flushes the prefetch queue. Segment registers are loaded
    with the data selector and the stack pointer is set to `0x90000`.
 5. Control passes to `0x10000`, where `kernel/entry.asm` calls `kmain()` in `kernel/kernel.c`.
-6. `kmain()` clears the VGA buffer, prints status lines, then calls `idt_init()`, `pic_init()`,
-   `pit_init(100)`, `kbd_init()`, and `heap_init()` in sequence, printing a status line after each.
-   As a smoke test of the new allocator, it also calls `kmalloc(64)`, copies a message into the
-   returned buffer, and prints both the message and `heap_used()`. It executes `int $3` to trigger
-   the breakpoint handler as a self-test — `exception_handler()` prints a confirmation and halts —
-   before interrupts are enabled. Assuming that self-test passes, `sti` is executed and the kernel
-   idles in a `hlt` loop, from which IRQ0 (timer) and IRQ1 (keyboard) events are serviced.
+6. `kmain()` runs, in order: `terminal_clear()`, `tss_init()` / `gdt_init()` / `tss_load()` (with a
+   GDT self-test and a TSS self-test), `idt_init()` (with a self-test), `paging_init()` and
+   `frame_init()` (each with a self-test), `pic_init()`, `pit_init(100)`, `kbd_init()`,
+   `line_editor_init()`, `shell_init()`, `task_init()` (with a self-test), `scheduler_init()` (with
+   a self-test), and `heap_init()` (with a self-test plus a smoke-test allocation). Each step prints
+   a status line, so a failure at any stage is visible on screen rather than silent. Once every
+   self-test has run, `sti` is executed and the kernel idles in a `hlt` loop; from there IRQ0
+   (timer, which also drives the scheduler) and IRQ1 (keyboard) events are serviced, and the shell
+   prompt accepts input.
 
 During the real-mode phase the boot sector prints status markers through BIOS teletype output:
 `READ_OK`, `A20_OK`, `GDT_OK`, and `PM_START`. A failed disk read prints `DISK_ERROR` and halts.
@@ -91,15 +105,6 @@ as a protected-mode sanity check.
 ---
 
 ## Architecture
-
-> Boot Foundation, Kernel Runtime, and Interrupt Handling are all real, shipped code. Interrupt
-> Handling now covers four populated IDT vectors — divide-by-zero, breakpoint, the PIC-remapped
-> hardware timer on IRQ0, and the keyboard on IRQ1 — plus a working PIC remap (with everything else
-> explicitly masked) and PIT. It does not cover any other hardware interrupt; vectors 4 through 31
-> besides 0 and 3, and every vector from 34 onward, are still null and will triple-fault the machine
-> if raised. A first-pass bump allocator (`kernel/heap.c`) also exists but isn't shown as its own
-> node below yet. Planned Subsystems is the honest label for everything that group represents — none
-> of it exists yet.
 
 ```mermaid
 flowchart TD
@@ -112,25 +117,40 @@ end
 subgraph group_kernel["Kernel Runtime"]
   node_kernel_entry["Kernel Entry<br/>[entry.asm]"]
   node_kernel_main["Kernel Main<br/>[kernel.c]"]
-  node_vga_terminal["VGA Terminal<br/>[kernel.c]"]
-  node_breakpoint["Breakpoint Trigger<br/>[kernel.c]"]
+  node_vga_terminal["VGA Terminal<br/>[console.c]"]
+  node_gdt_tss["GDT + TSS<br/>[gdt.c / tss.c]"]
 end
 
 subgraph group_interrupts["Interrupt Handling"]
   node_idt["IDT Setup<br/>[idt.c]"]
-  node_isr_stubs["ISR Stubs<br/>[isr.asm]"]
+  node_isr_stubs["ISR/IRQ Stubs<br/>[isr.asm]"]
   node_exception_handler["Exception Handler<br/>[kernel.c]"]
   node_pic["PIC Remap<br/>[pic.c]"]
   node_pit["PIT Timer<br/>[pit.c]"]
-  node_timer_handler["Timer Handler<br/>[kernel.c]"]
+  node_keyboard["Keyboard Driver<br/>[keyboard.c]"]
+end
+
+subgraph group_memory["Memory Management"]
+  node_paging["Paging + Address Spaces<br/>[paging.c]"]
+  node_frame["Frame Allocator<br/>[frame.c]"]
+  node_heap["Heap: kmalloc/kfree<br/>[heap.c]"]
+end
+
+subgraph group_tasking["Multitasking"]
+  node_task["Task Manager<br/>[task.c]"]
+  node_scheduler["Scheduler<br/>[scheduler.c]"]
+  node_ring3["Ring 3 / User Mode<br/>[ring3.c, usermode.asm]"]
+  node_syscall["Syscall Gate<br/>[syscall.c]"]
+end
+
+subgraph group_shell["Shell"]
+  node_line_editor["Line Editor<br/>[line_editor.c]"]
+  node_shell["Shell Commands<br/>[shell.c]"]
 end
 
 subgraph group_roadmap["Planned Subsystems"]
-  node_keyboard["Keyboard Driver"]
-  node_memory_management["Memory Management"]
   node_filesystem[("Filesystem Storage")]
-  node_multitasking["Process Multitasking"]
-  node_shell_userland["Shell Userland"]
+  node_disk[("Disk Driver")]
   node_graphics["Graphics Interface"]
 end
 
@@ -141,34 +161,52 @@ node_boot_sector -->|"enters mode"| node_protected_mode
 node_boot_sector -->|"transfers control"| node_kernel_entry
 node_kernel_entry -->|"calls kmain"| node_kernel_main
 node_kernel_main -->|"writes text"| node_vga_terminal
+node_kernel_main -->|"builds segments"| node_gdt_tss
 node_kernel_main -->|"initializes IDT"| node_idt
-node_kernel_main -->|"raises breakpoint"| node_breakpoint
-node_breakpoint -->|"raises vector"| node_idt
 node_kernel_main -->|"remaps PIC"| node_pic
 node_kernel_main -->|"programs channel 0"| node_pit
+node_kernel_main -->|"sets up paging"| node_paging
+node_paging -->|"backed by"| node_frame
+node_kernel_main -->|"initializes heap"| node_heap
+node_kernel_main -->|"starts tasking"| node_task
+node_task -->|"scheduled by"| node_scheduler
+node_scheduler -->|"switches CR3 via"| node_paging
+node_scheduler -->|"resumes esp0 via"| node_gdt_tss
+node_task -->|"can enter"| node_ring3
+node_ring3 -->|"traps via int 0x80"| node_syscall
 node_idt -->|"dispatches vector"| node_isr_stubs
 node_isr_stubs -->|"calls handler"| node_exception_handler
-node_isr_stubs -->|"calls handler"| node_timer_handler
-node_pit -->|"drives IRQ0"| node_timer_handler
-node_timer_handler -->|"sends EOI"| node_pic
+node_isr_stubs -->|"calls handler"| node_scheduler
+node_isr_stubs -->|"calls handler"| node_syscall
+node_pic -->|"drives IRQ1"| node_keyboard
+node_keyboard -->|"feeds keys"| node_line_editor
+node_line_editor -->|"submits line"| node_shell
+node_shell -->|"creates/kills"| node_task
+node_exception_handler -->|"terminates faulted Ring 3 task"| node_task
 
 click node_boot_sector "https://github.com/ria0304/lumen/blob/main/boot/boot.asm"
 click node_protected_mode "https://github.com/ria0304/lumen/blob/main/boot/boot.asm"
 click node_kernel_entry "https://github.com/ria0304/lumen/blob/main/kernel/entry.asm"
 click node_kernel_main "https://github.com/ria0304/lumen/blob/main/kernel/kernel.c"
-click node_vga_terminal "https://github.com/ria0304/lumen/blob/main/kernel/kernel.c"
-click node_breakpoint "https://github.com/ria0304/lumen/blob/main/kernel/kernel.c"
+click node_vga_terminal "https://github.com/ria0304/lumen/blob/main/kernel/console.c"
+click node_gdt_tss "https://github.com/ria0304/lumen/blob/main/kernel/gdt.c"
 click node_idt "https://github.com/ria0304/lumen/blob/main/kernel/idt.c"
 click node_isr_stubs "https://github.com/ria0304/lumen/blob/main/kernel/isr.asm"
 click node_exception_handler "https://github.com/ria0304/lumen/blob/main/kernel/kernel.c"
 click node_pic "https://github.com/ria0304/lumen/blob/main/kernel/pic.c"
 click node_pit "https://github.com/ria0304/lumen/blob/main/kernel/pit.c"
-click node_timer_handler "https://github.com/ria0304/lumen/blob/main/kernel/kernel.c"
-click node_keyboard "https://github.com/ria0304/lumen/tree/main/kernel"
-click node_memory_management "https://github.com/ria0304/lumen/tree/main/kernel"
+click node_keyboard "https://github.com/ria0304/lumen/blob/main/kernel/keyboard.c"
+click node_paging "https://github.com/ria0304/lumen/blob/main/kernel/paging.c"
+click node_frame "https://github.com/ria0304/lumen/blob/main/kernel/frame.c"
+click node_heap "https://github.com/ria0304/lumen/blob/main/kernel/heap.c"
+click node_task "https://github.com/ria0304/lumen/blob/main/kernel/task.c"
+click node_scheduler "https://github.com/ria0304/lumen/blob/main/kernel/scheduler.c"
+click node_ring3 "https://github.com/ria0304/lumen/blob/main/kernel/ring3.c"
+click node_syscall "https://github.com/ria0304/lumen/blob/main/kernel/syscall.c"
+click node_line_editor "https://github.com/ria0304/lumen/blob/main/kernel/line_editor.c"
+click node_shell "https://github.com/ria0304/lumen/blob/main/kernel/shell.c"
 click node_filesystem "https://github.com/ria0304/lumen/tree/main/kernel"
-click node_multitasking "https://github.com/ria0304/lumen/tree/main/kernel"
-click node_shell_userland "https://github.com/ria0304/lumen/tree/main/kernel"
+click node_disk "https://github.com/ria0304/lumen/tree/main/kernel"
 click node_graphics "https://github.com/ria0304/lumen/tree/main/kernel"
 
 classDef toneNeutral fill:#f8fafc,stroke:#334155,stroke-width:1.5px,color:#0f172a
@@ -178,10 +216,14 @@ classDef toneMint fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
 classDef toneRose fill:#ffe4e6,stroke:#e11d48,stroke-width:1.5px,color:#881337
 classDef toneIndigo fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81
 classDef toneTeal fill:#ccfbf1,stroke:#0f766e,stroke-width:1.5px,color:#134e4a
+classDef tonePurple fill:#ede9fe,stroke:#7c3aed,stroke-width:1.5px,color:#3b0764
 class node_boot_sector,node_protected_mode toneBlue
-class node_kernel_entry,node_kernel_main,node_vga_terminal,node_breakpoint toneAmber
-class node_idt,node_isr_stubs,node_exception_handler,node_pic,node_pit,node_timer_handler toneMint
-class node_keyboard,node_memory_management,node_filesystem,node_multitasking,node_shell_userland,node_graphics toneRose
+class node_kernel_entry,node_kernel_main,node_vga_terminal,node_gdt_tss toneAmber
+class node_idt,node_isr_stubs,node_exception_handler,node_pic,node_pit,node_keyboard toneMint
+class node_paging,node_frame,node_heap toneTeal
+class node_task,node_scheduler,node_ring3,node_syscall tonePurple
+class node_line_editor,node_shell toneAmber
+class node_filesystem,node_disk,node_graphics toneRose
 class node_bios toneIndigo
 ```
 
@@ -194,7 +236,13 @@ class node_bios toneIndigo
 | `0x00007C00` | Boot sector, loaded by the BIOS. Also the initial real-mode stack top (grows down) |
 | `0x00010000` | Kernel image (load address and link address) |
 | `0x00090000` | Protected-mode stack top (grows down) |
+| `0x00220000` | Master kernel page directory (`PAGE_DIRECTORY_ADDRESS`) |
+| `0x00221000` | Master kernel's first page table (`PAGE_TABLE_ADDRESS`) |
+| `0x00400000` | Kernel heap start (`HEAP_START`) — also the boundary of the identity-mapped region (`PAGING_IDENTITY_LIMIT`) that per-task page directories are allocated inside |
+| `0x00C00000` / `0x00C01000` | Legacy single-instance Ring 3 code / stack, used by the `usermode` shell command |
+| `0x01000000` / `0x01001000` | Per-task Ring 3 code / stack base, used by `taskuser` |
 | `0x000B8000` | VGA text-mode buffer, 80x25 cells of 16 bits each |
+| `0x00000000`-`0x00FFFFFF` (16 MiB) | Range tracked by the physical frame bitmap allocator (`FRAME_MEMORY_LIMIT`); physical memory above this is unmanaged |
 
 ---
 
@@ -202,64 +250,92 @@ class node_bios toneIndigo
 
 - **Custom bootloader instead of GRUB.** The project is intended to cover the full path from power-on
   to a running kernel, so no third-party bootloader is used.
-- **Flat GDT.** The GDT contains a null descriptor and two 4 GiB flat segments (code and data,
-  ring 0, 32-bit, 4 KiB granularity). Segmentation is effectively bypassed; memory protection is
-  expected to come from paging later.
+- **Flat GDT, plus dedicated Ring 3 and TSS descriptors.** Segmentation itself is still bypassed via
+  4 GiB flat segments; memory protection comes from paging and the descriptor privilege levels
+  (DPL 3 for user segments), not segment limits.
 - **Fast A20 via port `0x92`.** It is compact and works under QEMU. It is not guaranteed on all
   real hardware, where the keyboard-controller method may be required.
 - **Linked at `0x10000`.** `linker.ld` places `.text`, `.rodata`, `.data`, and `.bss` contiguously
   from the load address so the boot sector can jump directly to the start of the image.
-- **PIC masks set explicitly, not inherited from the BIOS.** `pic_init()` used to preserve whatever
-  mask the BIOS left behind, which meant IRQ1 (keyboard) could be unmasked with no IDT gate behind
-  it — an unhandled interrupt that triple-faulted the machine back to BIOS. `pic_init()` now masks
-  every IRQ except 0 and 1 outright, and a line is only unmasked once its handler is real (currently
-  IRQ0 and IRQ1). This should be the pattern for every future IRQ: add the ISR stub and IDT gate
-  first, unmask second.
-- **Bump allocator instead of a real heap.** `kmalloc()` only moves a pointer forward through a
-  fixed 64 KiB region and never frees; it exists to unblock later subsystems that need dynamic
-  allocation (a keyboard input buffer, for instance) before a proper free-list or slab allocator is
-  worth building.
+- **PIC masks set explicitly, not inherited from the BIOS.** Every IRQ line is masked at boot and
+  only unmasked once its handler is real. New devices should follow the same order: add the ISR
+  stub and IDT gate first, unmask second.
+- **One page directory per Ring 3 task.** `paging_create_address_space()` gives every Ring 3 task
+  isolated virtual memory instead of sharing the kernel's directory, and the scheduler swaps `CR3`
+  on every context switch (`paging_switch_directory()`). Kernel-ring tasks still share the single
+  master directory — there is no isolation between them, by design, since they're trusted code.
+- **New address-space page tables are populated before `CR3` is switched to them.** This is only
+  safe because a new directory's backing frame is guaranteed to sit below
+  `PAGING_IDENTITY_LIMIT` (4 MiB), which stays identity-mapped in the currently-active directory, so
+  the kernel can write into a not-yet-active address space through its own mapping.
+- **Round-robin scheduling driven off the PIT, with no priorities.** `scheduler_tick()` /
+  `scheduler_irq()` walk `task_t` slots looking for the next `TASK_READY` entry after the current
+  one. Simple, and fair in the sense that every ready task gets an equal-length slice, but there is
+  no notion of priority, nice values, or fairness beyond that.
+- **Fault-driven task teardown instead of a monolithic halt.** A Ring 3 fault on a small,
+  deliberately conservative set of vectors (divide-by-zero, overflow, bound-range, GPF,
+  stack-segment fault, page fault) now terminates just that task, rather than freezing the whole
+  system — the same recovery path used for a normal yield or exit. A Ring 0 fault still halts
+  everything, since the kernel is not expected to fault.
+- **Free-list heap replacing the original bump allocator.** `kmalloc()`/`kfree()` now split and (per
+  the block-header layout in `heap.c`) coalesce free blocks, rather than only ever moving a pointer
+  forward. See [Known Limitations](#known-limitations) for the concurrency caveat that comes with
+  turning on preemption over a heap that was written before preemption existed.
 
 ---
 
 ## Known Limitations
 
-- **Fixed 8-sector kernel load.** `boot.asm` reads exactly 8 sectors (4 KiB) via CHS `int 0x13`,
-  regardless of the kernel's actual size. The kernel currently fits well within that, but the read
-  count is not derived from the build output — it will silently stop loading the full kernel once
-  the linked image exceeds 4 KiB, with no error raised at boot time.
+- **The fixed-sector boot load has almost no headroom left.** `boot.asm` now reads 56 sectors
+  (28,672 bytes) via CHS `int 0x13`, up from the original 8 — but a from-scratch build of the
+  current kernel already produces a 27,964-byte `kernel.bin`. That is **708 bytes**, about a page
+  and a half, of remaining margin before the next feature silently truncates the loaded kernel with
+  no error at boot time. This is the single most likely thing to break the build for the next
+  person who adds a moderately-sized file. The right fix is deriving the sector count from the
+  build (e.g. having `make` patch a sector count into the boot sector, or the boot sector reading a
+  size prefix) rather than raising the constant again.
+- **The kernel heap is not interrupt-safe.** `kmalloc()`/`kfree()` manipulate a shared free list
+  with no `cli`/`sti` around the critical section, but the PIT now preempts through
+  `scheduler_irq()` on every tick and can switch to another task — including one also calling into
+  the allocator — in the middle of that manipulation. This has not shown up yet only because the
+  self-tests are effectively single-threaded at the point they run; it becomes a real, silent
+  heap-corruption risk as soon as two independently-scheduled tasks both allocate.
+- **Naming inconsistency: "Lumen" vs "Lumer."** The project, repository, and this README are named
+  Lumen, but the boot banner (`"Lumer kernel online!"`), the shell prompt (`Lumer>`), the `about`
+  and `version` commands (`"Lumer OS."` / `"Lumer OS version 0.1"`), and the built image filename
+  (`build/lumer.img`) all still say "Lumer." If this was originally a typo, it has since spread
+  across enough user-facing strings and the Makefile that it now reads as intentional; either way,
+  it's worth deciding one name and applying it everywhere rather than leaving both in the same
+  boot sequence.
 - **BIOS CHS disk access.** Adequate under QEMU, but not a viable long-term approach for larger
   images or real hardware.
-- **Boot-sector GDT.** The GDT lives in the boot sector's address range and is not owned by the
-  kernel. It should be re-established in kernel code once the kernel has its own memory layout.
-- **No `.bss` initialization.** The kernel entry stub does not zero `.bss`. This has no effect yet
-  because the kernel has no uninitialized globals.
-- **Only four IDT vectors are populated.** `idt_init()` sets gates for vector 0, vector 3, vector 32
-  (IRQ0), and vector 33 (IRQ1) and leaves the remaining 252 entries null. Any other exception (e.g.
-  a general protection fault or page fault, once paging exists) or hardware interrupt still has no
-  handler installed and will triple-fault the machine if raised. The PIC mask is set up correctly to
-  prevent this for every currently-unhandled line, but adding a new device means updating the IDT,
-  the ISR table in `isr.asm`, and the PIC mask together, in that order — see the note on PIC masking
-  under [Design Decisions](#design-decisions).
+- **Boot-sector GDT is replaced, not reused.** The real-mode GDT set up by `boot.asm` only exists
+  to survive the mode switch; `gdt_init()` in the kernel builds its own flat/Ring-3/TSS GDT
+  afterward, so the two are not the same table.
+- **No `.bss` initialization.** The kernel entry stub does not zero `.bss`, which matters more now
+  than it used to given how much more state (task table, frame bitmap, heap headers) is `static`.
 - **No caps lock or extended scancodes.** `kbd_handler()` tracks Shift but not Caps Lock, and does
-  not handle the 0xE0-prefixed scancodes used for arrow keys, Home/End, etc. — those bytes are
-  currently just dropped by the `scancode < 128` check.
+  not handle the `0xE0`-prefixed scancodes used for arrow keys, Home/End, etc.
 - **No spurious-IRQ handling.** `pic_send_eoi()` sends EOI unconditionally based on the IRQ number
   passed in; it does not check the PIC's in-service register, so a spurious IRQ7/IRQ15 would be
   acknowledged as if it were real.
-- **Heap has no `kfree` and no bounds enforcement beyond a single check.** `kmalloc()` refuses an
-  allocation that would exceed the 64 KiB region, but nothing reclaims memory, and there is no
-  guard against the heap region itself colliding with other physical memory usage as the kernel
-  grows.
-- **Boot message typo.** `kmain()` prints `"Lumer kernel online!"` instead of `"Lumen kernel
-  online!"` — a one-character fix in `kernel/kernel.c`.
+- **Frame allocator is capped at 16 MiB regardless of actual RAM.** `FRAME_MEMORY_LIMIT` is a
+  compile-time constant; there is no memory-map probing (e.g. via BIOS `int 0x15, eax=0xE820`), so
+  physical memory above 16 MiB is neither tracked nor usable even if QEMU is given more.
+  `MAX_TASKS` is similarly a fixed compile-time ceiling of 16.
+- **Syscalls are a proof of concept, not an ABI.** `syscall_handler()` confirms the Ring 3 -> Ring 0
+  transition through the `int 0x80` gate works, but it does not read `eax` as a syscall number or
+  dispatch anywhere; there is exactly one "syscall," and it does the same thing regardless of what
+  the caller passed.
+- **Stray debug backups are sitting in the working tree.** `.ring3_backup_20260926_192703/` and
+  `.ring3_backup_20260926_192929/` are snapshots of several kernel files from mid-session debugging,
+  and neither directory is covered by `.gitignore`. They aren't referenced by the build and should
+  either be deleted or moved outside the repo before the next commit.
+- **`run.sh` is still an empty file.** Use `make run` or the direct QEMU invocation below.
 
 ---
 
 ## Building and Running
-
-**Note:** the `Makefile` is written and working. `run.sh` is still empty; use `make run` or the
-direct QEMU invocation below until it's filled in.
 
 ### Requirements
 
@@ -279,10 +355,15 @@ sudo apt install build-essential gcc-multilib nasm qemu-system-x86 gdb
 make
 ```
 
-This assembles the boot sector and every kernel object (`entry.asm`, `isr.asm`, `kernel.c`, `idt.c`,
-`pic.c`, `pit.c`, `keyboard.c`, `heap.c`), links them against `linker.ld`, and concatenates the raw
-boot sector binary with the raw kernel binary into `build/lumer.img`, truncated/padded to a 1.44 MiB
-floppy image. `make clean` removes the `build/` directory.
+This assembles the boot sector and every kernel object — `entry.asm`, `usermode.asm`, `isr.asm`,
+`gdt_flush.asm`, `tss_load.asm`, `gdt.c`, `tss.c`, `kernel.c`, `console.c`, `idt.c`, `pic.c`,
+`pit.c`, `keyboard.c`, `heap.c`, `line_editor.c`, `shell.c`, `task.c`, `scheduler.c`,
+`task_demo.c`, `paging.c`, `frame.c`, `ring3.c`, `syscall.c` — links them against `linker.ld`, and
+concatenates the raw boot sector binary with the raw kernel binary into `build/lumer.img`,
+truncated/padded to a 1.44 MiB floppy image. This was verified against the current source: a clean
+build compiles and links without errors (two linker notices — an executable-stack warning from
+`tss_load.o` and an RWX `LOAD` segment warning — are expected and non-fatal). `make clean` removes
+the `build/` directory.
 
 ### Run
 
@@ -303,21 +384,39 @@ qemu-system-i386 -fda build/lumer.img
 ```
 Lumen/
 ├── boot/
-│   ├── boot.asm        Boot sector: kernel load, A20, GDT, protected-mode switch
-│   └── boot_day1.asm   Early 16-bit prototype; retained for reference, not part of the build
+│   ├── boot.asm         Boot sector: kernel load (56 sectors), A20, GDT, protected-mode switch
+│   └── boot_day1.asm    Early 16-bit prototype; retained for reference, not part of the build
 ├── kernel/
-│   ├── entry.asm       32-bit entry stub: stack setup, calls kmain()
-│   ├── kernel.c        Kernel main: VGA output, exception/timer handlers, heap smoke test, idle loop
-│   ├── idt.c / idt.h   IDT setup for vectors 0, 3, 32, and 33
-│   ├── isr.asm         ISR/IRQ stubs (isr0, isr3, irq0, irq1) and lidt wrapper
-│   ├── pic.c / pic.h   8259 PIC remap (IRQ0-15 -> vectors 32-47), explicit mask, and EOI
-│   ├── pit.c / pit.h   8253/8254 PIT channel 0 programming
-│   ├── keyboard.c      IRQ1 handler: scancode-to-ASCII with Shift tracking, backspace
-│   └── heap.c / heap.h Bump allocator (kmalloc, no kfree)
-├── linker.ld           Linker script (kernel linked at 0x10000)
-├── Makefile             Build automation (working: produces build/lumer.img)
-└── run.sh              QEMU launch script (not yet written)
+│   ├── entry.asm        32-bit entry stub: stack setup, calls kmain()
+│   ├── kernel.c         kmain(), exception/timer dispatch, boot self-test sequencing
+│   ├── console.c/.h     VGA terminal: scrolling, hardware cursor, info/warn/error helpers
+│   ├── gdt.c/.h         Flat + Ring 3 + TSS descriptors, gdt_flush.asm
+│   ├── tss.c/.h         Hardware TSS, tss_load.asm, per-task esp0 updates
+│   ├── idt.c/.h         Full IDT: 32 exceptions, 16 IRQs, DPL-3 syscall gate
+│   ├── isr.asm          ISR/IRQ/syscall stubs and lidt wrapper
+│   ├── pic.c/.h         8259 PIC remap (IRQ0-15 -> vectors 32-47), explicit mask, EOI
+│   ├── pit.c/.h         8253/8254 PIT channel 0 programming
+│   ├── keyboard.c       IRQ1 handler: scancode-to-ASCII with Shift tracking
+│   ├── line_editor.c/.h Line buffering with backspace, feeds the shell
+│   ├── shell.c/.h       Command parser: help/clear/echo/about/version/mem/uptime/task/.../usermode
+│   ├── paging.c/.h      Master directory, per-task address spaces, map/unmap/query API
+│   ├── frame.c/.h       Bitmap physical frame allocator (16 MiB range)
+│   ├── heap.c/.h        Free-list allocator: kmalloc + kfree, splitting/coalescing
+│   ├── task.c/.h        Task table, create/terminate/block/wake/yield/exit
+│   ├── task_demo.c      Trivial task entry point used by task_create() (hlt loop)
+│   ├── scheduler.c/.h   Round-robin preemptive scheduler, PIT-driven
+│   ├── ring3.c/.h       Ring 3 program mapping + entry, shared by usermode/taskuser
+│   ├── usermode.asm     enter_user_mode: iret into Ring 3
+│   ├── syscall.c/.h     int 0x80 handler (proof-of-concept, single syscall)
+│   └── privilege.h      Ring/selector constants shared across the above
+├── linker.ld            Linker script (kernel linked at 0x10000)
+├── Makefile             Build automation (verified: produces build/lumer.img cleanly)
+└── run.sh               QEMU launch script (still empty — use `make run`)
 ```
+
+`.ring3_backup_20260926_*/` directories currently also exist in the working tree; they are debug
+snapshots, not part of the build, and are not listed above — see
+[Known Limitations](#known-limitations).
 
 ---
 
@@ -325,27 +424,39 @@ Lumen/
 
 Milestones are listed in intended order.
 
-1. **Boot and kernel foundation** (done): boot sector, protected mode, C entry, VGA output driver.
-2. **Interrupts and input** (in progress): CPU exception handling (divide-by-zero, breakpoint), PIC
-   remap with explicit masking, a PIT-driven IRQ0 timer, and an IRQ1 keyboard driver with Shift
-   support are all working. Remaining: gates for the other exception vectors (GPF, page fault,
-   etc.), caps lock and extended-scancode handling, and a real IRQ mask/unmask API rather than the
-   current fixed mask set in `pic_init()`.
-3. **Memory management** (in progress): a bump allocator (`kmalloc`, no `kfree`) is working.
-   Remaining: a physical page allocator, `kfree`/reclamation, and paging.
-4. **Storage and filesystem**: disk driver and a simple filesystem.
-5. **Processes and shell**: task switching, system calls, and an interactive shell.
-6. **Utilities and stabilization**: basic userland programs and hardening.
-7. **Graphics** (stretch): framebuffer and a minimal GUI.
+1. **Boot and kernel foundation** (done): boot sector, protected mode, C entry, VGA output driver
+   with scrolling and a hardware cursor.
+2. **Interrupts and input** (done): full IDT (all exceptions, all IRQs, syscall gate), PIC remap
+   with explicit masking, a PIT-driven IRQ0 timer, and an IRQ1 keyboard driver with Shift support.
+   Remaining: Caps Lock, extended scancodes, spurious-IRQ handling.
+3. **Memory management** (done for the core, hardening remains): paging with per-task address
+   spaces, a bitmap frame allocator, and a free-list heap with `kfree` are all working. Remaining:
+   make the heap interrupt-safe, probe the real memory map instead of a fixed 16 MiB limit, derive
+   the boot sector's sector count from the build instead of a hand-raised constant.
+4. **Processes and shell** (done for the core): preemptive round-robin scheduling across Ring 0 and
+   Ring 3 tasks, per-task address spaces, fault isolation that kills a faulted task instead of the
+   machine, a `int 0x80` syscall gate, and an interactive shell. Remaining: a real syscall ABI and
+   dispatch table (today there is exactly one syscall), priorities/fairness beyond round-robin, and
+   more than `MAX_TASKS` (16) concurrent tasks if that ceiling turns out to matter.
+5. **Storage and filesystem** (not started): disk driver and a simple filesystem.
+6. **Utilities and stabilization** (not started): userland programs beyond the one hard-coded test
+   program, and hardening of the above.
+7. **Graphics** (stretch, not started): framebuffer and a minimal GUI.
 
-The project is developed part-time with a target of April 2027. Completing milestones 1 through 5 is
-considered a successful outcome; milestone 7 is optional.
+The project is developed part-time with a target of April 2027. Completing milestones 1 through 5
+is considered a successful outcome; milestone 7 is optional.
 
 ---
 
 ## Testing Environment
 
-Lumen is run exclusively as a QEMU virtual machine on Ubuntu. It has not been tested on physical
-hardware, and it does not write to any physical disk.
+Lumen is developed against QEMU (`qemu-system-i386 -fda build/lumer.img`) on Ubuntu. It has not
+been tested on physical hardware, and it does not write to any physical disk. The build itself
+(NASM assembly, GCC compilation, and linking into `build/lumer.img`) was independently re-verified
+against the current source while writing this README; it completes without errors.
 
 ---
+
+## License
+
+MIT.
