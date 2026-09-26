@@ -191,8 +191,15 @@ void kmain(void)
     if (frame_run_self_test()) {
         console_info("Frame allocator test: PASS");
     } else {
-        console_info("Frame allocator test: FAILED");
+        console_error("Frame allocator test: FAILED");
     }
+
+    if (paging_run_self_test()) {
+        console_info("Paging dynamic memory test: PASS");
+    } else {
+        console_error("Paging dynamic memory test: FAILED");
+    }
+
     console_info("IDT initialized: OK");
 
     pic_init();
@@ -227,6 +234,12 @@ void kmain(void)
 
     heap_init();
     console_info("Memory allocator: OK");
+
+    if (heap_run_self_test()) {
+        console_info("Heap self-test: PASS");
+    } else {
+        console_error("Heap self-test: FAILED");
+    }
 
     char *buffer = (char *)kmalloc(64);
 
