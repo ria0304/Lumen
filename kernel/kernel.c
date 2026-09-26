@@ -125,7 +125,6 @@ void timer_handler(void)
     /*
      * Send End Of Interrupt to the master PIC.
      */
-    scheduler_tick();
     pic_send_eoi(0);
 }
 

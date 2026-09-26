@@ -21,6 +21,7 @@ extern exception_handler
 extern timer_handler
 extern kbd_handler
 extern syscall_handler
+extern scheduler_irq
 
 idt_load:
     mov eax, [esp + 4]
@@ -131,7 +132,17 @@ isr_default:
 
 irq0:
     pusha
-    call timer_handler
+
+    ; Pass the current PUSHA frame to the scheduler.
+    mov eax, esp
+    push eax
+    call scheduler_irq
+    add esp, 4
+
+    ; scheduler_irq returns the next task's frame.
+    mov esp, eax
+
+    ; Restore the selected task.
     popa
     iret
 

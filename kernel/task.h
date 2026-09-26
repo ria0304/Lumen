@@ -36,6 +36,24 @@ typedef struct {
     uint32_t stack_base;
     uint32_t stack_size;
 
+    /*
+     * Address of the saved interrupt frame.
+     *
+     * Layout:
+     *   EDI
+     *   ESI
+     *   EBP
+     *   ESP (ignored by POPA)
+     *   EBX
+     *   EDX
+     *   ECX
+     *   EAX
+     *   EIP
+     *   CS
+     *   EFLAGS
+     */
+    uint32_t switch_esp;
+
     task_context_t context;
 } task_t;
 
