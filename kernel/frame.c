@@ -97,10 +97,12 @@ void frame_init(void)
 
     /*
      * Static page directory + first page table.
+     * Keep this region contiguous with the heap reservation
+     * so there is no allocator/free-policy mismatch.
      */
     reserve_range(
-        0x00220000U,
-        0x00222000U
+        0x00210000U,
+        0x00212000U
     );
 
     console_info(
@@ -143,7 +145,7 @@ int frame_free(uint32_t physical_address)
      * Never allow the allocator to release reserved
      * boot/kernel/heap/paging memory.
      */
-    if (physical_address < 0x00222000U)
+    if (physical_address < 0x00212000U)
         return -1;
 
     uint32_t index =
