@@ -5,6 +5,7 @@
 #include "privilege.h"
 
 #define MAX_TASKS 16
+#define TASK_STACK_SIZE 4096
 
 typedef enum {
     TASK_UNUSED = 0,
@@ -15,9 +16,27 @@ typedef enum {
 } task_state_t;
 
 typedef struct {
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    uint32_t esi;
+    uint32_t edi;
+    uint32_t ebp;
+    uint32_t esp;
+    uint32_t eip;
+    uint32_t eflags;
+} task_context_t;
+
+typedef struct {
     uint32_t id;
     task_state_t state;
     uint32_t privilege;
+
+    uint32_t stack_base;
+    uint32_t stack_size;
+
+    task_context_t context;
 } task_t;
 
 void task_init(void);

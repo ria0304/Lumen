@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "gdt.h"
 #include "tss.h"
+#include "scheduler.h"
 #include "idt.h"
 #include "pic.h"
 #include "pit.h"
@@ -124,6 +125,7 @@ void timer_handler(void)
     /*
      * Send End Of Interrupt to the master PIC.
      */
+    scheduler_tick();
     pic_send_eoi(0);
 }
 
@@ -134,6 +136,7 @@ void kmain(void)
     tss_init();
     gdt_init();
     tss_load();
+    scheduler_init();
 
     console_info("Lumer kernel online!");
     console_info("VGA text driver: OK");
