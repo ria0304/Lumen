@@ -3,6 +3,7 @@
 #include "tss.h"
 #include "scheduler.h"
 #include "paging.h"
+#include "frame.h"
 #include "idt.h"
 #include "pic.h"
 #include "pit.h"
@@ -144,6 +145,13 @@ void kmain(void)
 
     idt_init();
     paging_init();
+    frame_init();
+
+    if (frame_run_self_test()) {
+        console_info("Frame allocator test: PASS");
+    } else {
+        console_info("Frame allocator test: FAILED");
+    }
     console_info("IDT initialized: OK");
 
     pic_init();

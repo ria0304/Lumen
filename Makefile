@@ -12,7 +12,7 @@ BOOT_ASM = boot/boot.asm
 
 KERNEL_OBJS = $(BUILD)/entry.o $(BUILD)/usermode.o $(BUILD)/isr.o $(BUILD)/gdt_flush.o $(BUILD)/gdt.o $(BUILD)/tss_load.o $(BUILD)/tss.o \
               $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/idt.o $(BUILD)/pic.o $(BUILD)/pit.o $(BUILD)/keyboard.o $(BUILD)/heap.o \
-              $(BUILD)/line_editor.o $(BUILD)/shell.o $(BUILD)/task.o $(BUILD)/scheduler.o $(BUILD)/task_demo.o $(BUILD)/paging.o $(BUILD)/syscall.o
+              $(BUILD)/line_editor.o $(BUILD)/shell.o $(BUILD)/task.o $(BUILD)/scheduler.o $(BUILD)/task_demo.o $(BUILD)/paging.o $(BUILD)/frame.o $(BUILD)/syscall.o
 
 KERNEL_ELF = $(BUILD)/kernel.elf
 KERNEL_BIN = $(BUILD)/kernel.bin
