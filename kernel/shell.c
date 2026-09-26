@@ -110,7 +110,7 @@ void shell_handle_line(const char *line)
 
         console_info("Commands: help, clear, echo, about, version, mem, uptime, task, taskkill, tasks, taskuser");
         console_info("Protection: vmtest, privtest");
-        console_info("Filesystem: format, ls, cat <file>, write <file> <text>, rm <file>, run <file>");
+        console_info("Storage: format, ls, cat <file>, write <file> <text>, rm <file>, storage-test, run <file>");
     }
     else if (string_starts_with(line, "echo ")) {
         terminal_write(line + 5);
@@ -319,6 +319,13 @@ void shell_handle_line(const char *line)
             }
         }
     }
+    else if (string_starts_with(line, "storage-test")) {
+        if (!fs_is_mounted()) {
+            console_error("Storage test requires a formatted filesystem");
+        } else if (fs_self_test() != 0) {
+            console_error("Storage test failed");
+        }
+    }
     else if (line[0] == 'f' &&
              line[1] == 'o' &&
              line[2] == 'r' &&
@@ -339,15 +346,23 @@ void shell_handle_line(const char *line)
     }
     else if (string_starts_with(line, "cat ")) {
         const char *filename = line + 4;
-        char buffer[513];
-        int read = fs_read(filename, buffer, sizeof(buffer) - 1);
 
-        if (read < 0) {
-            console_error("No such file");
+        while (*filename == ' ')
+            filename++;
+
+        if (*filename == '\0') {
+            console_error("Usage: cat <file>");
         } else {
-            buffer[read] = '\0';
-            terminal_write(buffer);
-            terminal_putchar('\n');
+            char buffer[513];
+            int read = fs_read(filename, buffer, sizeof(buffer) - 1);
+
+            if (read < 0) {
+                console_error("No such file");
+            } else {
+                buffer[read] = '\0';
+                terminal_write(buffer);
+                terminal_putchar('\n');
+            }
         }
     }
     else if (string_starts_with(line, "write ")) {

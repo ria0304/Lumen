@@ -82,6 +82,20 @@ static uint32_t fs_sectors_for_size(uint32_t size)
     return (size + 511U) / 512U;
 }
 
+static int fs_range_valid(uint32_t start_lba, uint32_t sector_count)
+{
+    if (start_lba < FS_DATA_START_LBA)
+        return 0;
+
+    if (sector_count > FS_DISK_SECTORS)
+        return 0;
+
+    if (start_lba >= FS_DISK_SECTORS)
+        return 0;
+
+    return sector_count <= (FS_DISK_SECTORS - start_lba);
+}
+
 /* Writes the current in-memory superblock + directory to disk.
  * Called after every create/write/delete so a reboot never loses
  * a change that already returned success to the caller. */
@@ -153,6 +167,12 @@ void fs_init(void)
     }
 
     fs_next_free_lba = get_u32(fs_sector_scratch + 4);
+
+    if (fs_next_free_lba < FS_DATA_START_LBA ||
+        fs_next_free_lba > FS_DISK_SECTORS) {
+        console_warn("FS: invalid superblock allocation pointer");
+        return;
+    }
 
     if (ata_read_sectors(
             FS_DIR_START_LBA,
@@ -250,7 +270,12 @@ int fs_write(const char *name, const void *data, uint32_t size)
 
     uint32_t sectors_needed = fs_sectors_for_size(size);
 
-    if (sectors_needed > FS_MAX_FILE_SECTORS)
+    if (sectors_needed == 0 || sectors_needed > FS_MAX_FILE_SECTORS)
+        return -1;
+
+    uint32_t name_length = fs_string_length(name, FS_NAME_LEN);
+
+    if (name_length == 0 || name_length >= FS_NAME_LEN)
         return -1;
 
     int idx = fs_find(name);
@@ -264,6 +289,10 @@ int fs_write(const char *name, const void *data, uint32_t size)
             start_lba = directory[idx].start_lba;
         } else {
             start_lba = fs_next_free_lba;
+
+            if (!fs_range_valid(start_lba, sectors_needed))
+                return -1;
+
             fs_next_free_lba += sectors_needed;
         }
 
@@ -275,6 +304,10 @@ int fs_write(const char *name, const void *data, uint32_t size)
             return -1;
 
         start_lba = fs_next_free_lba;
+
+        if (!fs_range_valid(start_lba, sectors_needed))
+            return -1;
+
         fs_next_free_lba += sectors_needed;
     }
 
@@ -306,7 +339,7 @@ int fs_write(const char *name, const void *data, uint32_t size)
 
 int fs_read(const char *name, void *buffer, uint32_t buffer_size)
 {
-    if (!fs_mounted)
+    if (!fs_mounted || buffer == 0)
         return -1;
 
     int idx = fs_find(name);
@@ -319,7 +352,11 @@ int fs_read(const char *name, void *buffer, uint32_t buffer_size)
     uint32_t start_lba = directory[idx].start_lba;
     uint8_t *dst = (uint8_t *)buffer;
 
+    uint32_t stored_sectors = fs_sectors_for_size(total);
     uint32_t sectors = fs_sectors_for_size(to_read);
+
+    if (!fs_range_valid(start_lba, stored_sectors))
+        return -1;
 
     for (uint32_t s = 0; s < sectors; s++) {
 
@@ -424,4 +461,58 @@ uint32_t fs_file_count(void)
     }
 
     return count;
+}
+
+int fs_self_test(void)
+{
+    static const char test_data[] =
+        "Lumen disk I/O and filesystem self-test.";
+
+    char readback[sizeof(test_data)];
+
+    if (!fs_mounted) {
+        console_error("FS self-test: filesystem not mounted");
+        return -1;
+    }
+
+    if (fs_write("__storage_test", test_data, sizeof(test_data) - 1) != 0) {
+        console_error("FS self-test: write failed");
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < sizeof(readback); i++)
+        readback[i] = '\0';
+
+    int read = fs_read(
+        "__storage_test",
+        readback,
+        sizeof(readback) - 1
+    );
+
+    if (read != (int)(sizeof(test_data) - 1)) {
+        console_error("FS self-test: read length failed");
+        fs_delete("__storage_test");
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < sizeof(test_data) - 1; i++) {
+        if (readback[i] != test_data[i]) {
+            console_error("FS self-test: data mismatch");
+            fs_delete("__storage_test");
+            return -1;
+        }
+    }
+
+    if (fs_delete("__storage_test") != 0) {
+        console_error("FS self-test: delete failed");
+        return -1;
+    }
+
+    if (fs_file_count() != 0) {
+        console_error("FS self-test: directory cleanup failed");
+        return -1;
+    }
+
+    console_info("Disk I/O + filesystem self-test: PASS");
+    return 0;
 }

@@ -34,6 +34,7 @@
 #define FS_DIR_SECTORS        5U /* 64 * 40 bytes = 2560 bytes = 5 sectors */
 #define FS_DATA_START_LBA     (FS_DIR_START_LBA + FS_DIR_SECTORS)
 #define FS_MAX_FILE_SECTORS   16U /* 8 KiB per file, hard cap */
+#define FS_DISK_SECTORS       8192U /* 4 MiB QEMU disk image */
 
 typedef struct {
     char name[FS_NAME_LEN];
@@ -76,5 +77,8 @@ const fs_entry_t *fs_stat(const char *name);
 void fs_list(void);
 
 uint32_t fs_file_count(void);
+
+/* End-to-end filesystem/storage verification. */
+int fs_self_test(void);
 
 #endif

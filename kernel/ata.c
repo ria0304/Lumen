@@ -24,6 +24,7 @@
 #define ATA_CMD_READ    0x20
 #define ATA_CMD_WRITE   0x30
 #define ATA_CMD_IDENTIFY 0xEC
+#define ATA_CMD_FLUSH 0xE7
 
 #define ATA_STATUS_ERR  0x01
 #define ATA_STATUS_DRQ  0x08
@@ -166,7 +167,7 @@ static int ata_select_lba(uint32_t lba, uint8_t count)
 
 int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer)
 {
-    if (!drive_ready || count == 0)
+    if (!drive_ready || count == 0 || buffer == 0)
         return -1;
 
     if (ata_select_lba(lba, count) != 0)
@@ -192,7 +193,7 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer)
 
 int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer)
 {
-    if (!drive_ready || count == 0)
+    if (!drive_ready || count == 0 || buffer == 0)
         return -1;
 
     if (ata_select_lba(lba, count) != 0)
@@ -213,12 +214,12 @@ int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer)
         src += 256;
     }
 
-    /* Flush the write cache once the whole transfer is queued, so
-     * it's actually durable rather than sitting in cache only. */
+    /* Wait for the device to finish accepting the transfer before
+     * flushing its write cache. */
     if (ata_wait_not_busy() != 0)
         return -1;
 
-    outb(ATA_COMMAND, 0xE7);
+    outb(ATA_COMMAND, ATA_CMD_FLUSH);
 
     if (ata_wait_not_busy() != 0)
         return -1;
