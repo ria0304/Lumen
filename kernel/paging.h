@@ -86,6 +86,12 @@ uint32_t paging_virtual_to_physical(
     uint32_t virtual_address
 );
 
+/* Get physical address from a specific page directory (not current CR3) */
+uint32_t paging_get_physical_from_directory(
+    uint32_t directory_physical,
+    uint32_t virtual_address
+);
+
 uint32_t paging_directory_entries_used(void);
 
 int paging_run_self_test(void);

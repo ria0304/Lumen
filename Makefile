@@ -3,7 +3,7 @@ LD = ld
 ASM = nasm
 
 CFLAGS = -m32 -ffreestanding -fno-pie -fno-stack-protector -nostdlib \
-         -Wall -Wextra -c
+         -Wall -Wextra -Wno-error -c
 LDFLAGS = -m elf_i386 -T linker.ld -nostdlib
 
 BUILD = build

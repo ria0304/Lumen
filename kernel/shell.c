@@ -659,6 +659,91 @@ void shell_handle_line(const char *line)
             terminal_putchar('\n');
         }
     }
+    else if (string_starts_with(line, "ln ")) {
+        const char *rest = line + 3;
+        int symbolic = 0;
+
+        while (*rest == ' ')
+            rest++;
+
+        if (string_starts_with(rest, "-s ")) {
+            symbolic = 1;
+            rest += 3;
+        }
+
+        const char *space = 0;
+        for (const char *p = rest; *p != '\0'; p++) {
+            if (*p == ' ') {
+                space = p;
+                break;
+            }
+        }
+
+        if (space == 0 || space == rest || space[1] == '\0') {
+            console_error("Usage: ln [-s] <target> <link>");
+        } else {
+            char target[FS_PATH_MAX];
+            char linkpath[FS_PATH_MAX];
+            uint32_t target_len = (uint32_t)(space - rest);
+
+            if (target_len >= FS_PATH_MAX) {
+                console_error("ln: target path too long");
+            } else {
+                for (uint32_t i = 0; i < target_len; i++)
+                    target[i] = rest[i];
+                target[target_len] = '\0';
+
+                const char *linkname = space + 1;
+                while (*linkname == ' ')
+                    linkname++;
+
+                if (*linkname == '\0') {
+                    console_error("Usage: ln [-s] <target> <link>");
+                } else {
+                    for (uint32_t i = 0; i < FS_PATH_MAX - 1 && linkname[i] != '\0'; i++)
+                        linkpath[i] = linkname[i];
+                    linkpath[FS_PATH_MAX - 1] = '\0';
+
+                    int rc;
+                    if (symbolic) {
+                        rc = fs_symlink(target, linkpath, FS_ROOT);
+                        if (rc == FS_OK)
+                            console_info("Symlink created");
+                        else
+                            console_error("ln: "), terminal_write(fs_strerror(rc)), terminal_putchar('\n');
+                    } else {
+                        rc = fs_link(target, linkpath, FS_ROOT);
+                        if (rc == FS_OK)
+                            console_info("Hard link created");
+                        else
+                            console_error("ln: "), terminal_write(fs_strerror(rc)), terminal_putchar('\n');
+                    }
+                }
+            }
+        }
+    }
+    else if (string_starts_with(line, "readlink ")) {
+        const char *linkpath = line + 9;
+
+        while (*linkpath == ' ')
+            linkpath++;
+
+        if (*linkpath == '\0') {
+            console_error("Usage: readlink <link>");
+        } else {
+            char target[256];
+            int rc = fs_readlink(linkpath, FS_ROOT, target, sizeof(target));
+
+            if (rc == FS_OK) {
+                terminal_write(target);
+                terminal_putchar('\n');
+            } else {
+                console_error("readlink: ");
+                terminal_write(fs_strerror(rc));
+                terminal_putchar('\n');
+            }
+        }
+    }
     else if (string_starts_with(line, "mv ")) {
         const char *rest = line + 3;
 

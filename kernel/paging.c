@@ -465,6 +465,33 @@ uint32_t paging_virtual_to_physical(
          (PAGE_SIZE - 1U));
 }
 
+uint32_t paging_get_physical_from_directory(
+    uint32_t directory_physical,
+    uint32_t virtual_address
+)
+{
+    uint32_t pde_index = virtual_address >> 22;
+    uint32_t pte_index = (virtual_address >> 12) & 0x3FFU;
+
+    /* Get the page directory entry */
+    uint32_t *page_directory = (uint32_t *)directory_physical;
+    uint32_t pde = page_directory[pde_index];
+
+    if ((pde & PAGE_PRESENT) == 0)
+        return 0;
+
+    /* Get the page table */
+    uint32_t page_table_phys = pde & 0xFFFFF000U;
+    uint32_t *page_table = (uint32_t *)page_table_phys;
+
+    uint32_t pte = page_table[pte_index];
+
+    if ((pte & PAGE_PRESENT) == 0)
+        return 0;
+
+    return (pte & 0xFFFFF000U) + (virtual_address & (PAGE_SIZE - 1U));
+}
+
 uint32_t paging_directory_entries_used(void)
 {
     uint32_t count = 0;

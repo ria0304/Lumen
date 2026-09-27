@@ -158,6 +158,15 @@ int fs_delete(const char *path, fs_cred_t cred);
 /* Truncate to zero length, keeping the inode. */
 int fs_truncate(const char *path, fs_cred_t cred);
 
+/* Create a symbolic link. */
+int fs_symlink(const char *target, const char *linkpath, fs_cred_t cred);
+
+/* Read the target of a symbolic link. */
+int fs_readlink(const char *linkpath, fs_cred_t cred, char *buf, uint32_t buf_size);
+
+/* Create a hard link to an existing file. */
+int fs_link(const char *existing_path, const char *new_path, fs_cred_t cred);
+
 /* ---- Directories --------------------------------------------------- */
 
 int fs_mkdir(const char *path, fs_cred_t cred, uint8_t mode);

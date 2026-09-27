@@ -68,6 +68,7 @@
 #define FS_TYPE_FREE      0
 #define FS_TYPE_FILE      1
 #define FS_TYPE_DIR       2
+#define FS_TYPE_SYMLINK   3
 
 /*
  * Permission bits, in the usual Unix arrangement. Stored as one

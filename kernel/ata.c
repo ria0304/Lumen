@@ -2,6 +2,10 @@
 #include <stddef.h>
 #include "ata.h"
 #include "console.h"
+#include "frame.h"
+#include "paging.h"
+
+static void print_hex32(uint32_t value);
 
 /* Primary ATA bus, I/O port block. */
 #define ATA_IO_BASE     0x1F0
@@ -22,10 +26,32 @@
  * guaranteed valid). */
 #define ATA_CONTROL     0x3F6
 
-#define ATA_CMD_READ    0x20
-#define ATA_CMD_WRITE   0x30
-#define ATA_CMD_IDENTIFY 0xEC
-#define ATA_CMD_FLUSH 0xE7
+/* Secondary ATA bus, I/O port block. */
+#define ATA2_IO_BASE    0x170
+#define ATA2_DATA       (ATA2_IO_BASE + 0)
+#define ATA2_ERROR      (ATA2_IO_BASE + 1)
+#define ATA2_SECCOUNT   (ATA2_IO_BASE + 2)
+#define ATA2_LBA_LOW    (ATA2_IO_BASE + 3)
+#define ATA2_LBA_MID    (ATA2_IO_BASE + 4)
+#define ATA2_LBA_HIGH   (ATA2_IO_BASE + 5)
+#define ATA2_DRIVE_HEAD (ATA2_IO_BASE + 6)
+#define ATA2_STATUS     (ATA2_IO_BASE + 7)
+#define ATA2_COMMAND    (ATA2_IO_BASE + 7)
+#define ATA2_CONTROL    0x376
+
+/* DMA registers (bus master IDE) */
+#define ATA_BM_BASE     0xD000
+#define ATA_BM_COMMAND  (ATA_BM_BASE + 0)
+#define ATA_BM_STATUS   (ATA_BM_BASE + 2)
+#define ATA_BM_PRDT     (ATA_BM_BASE + 4)
+
+#define ATA_CMD_READ         0x20
+#define ATA_CMD_WRITE        0x30
+#define ATA_CMD_READ_DMA     0xC8
+#define ATA_CMD_WRITE_DMA    0xCA
+#define ATA_CMD_IDENTIFY     0xEC
+#define ATA_CMD_FLUSH        0xE7
+#define ATA_CMD_FLUSH_EXT    0xEA
 
 #define ATA_STATUS_ERR  0x01
 #define ATA_STATUS_DRQ  0x08
@@ -34,13 +60,31 @@
 #define ATA_STATUS_RDY  0x40
 #define ATA_STATUS_BSY  0x80
 
-static int drive_ready = 0;
+#define ATA_BM_CMD_START    0x01
+#define ATA_BM_CMD_WRITE    0x08
+#define ATA_BM_STATUS_INTR  0x04
+#define ATA_BM_STATUS_ERR   0x02
+#define ATA_BM_STATUS_ACT   0x01
 
-/* Drive capacity and identity, filled from the IDENTIFY payload. */
+#define PRDT_FLAG_EOT  0x80000000
+
+static int drive_ready = 0;
+static int drive_ready2 = 0;
+static int dma_supported = 0;
+static uint32_t dma_prdt_phys = 0;
+static uint16_t *dma_prdt = 0;
+
+/* Drive 0 (primary master) capacity and identity */
 static uint64_t total_sectors = 0;
 static char model[41];
 static char serial[21];
 static int needs_lba48 = 0;
+
+/* Drive 1 (secondary master) capacity and identity */
+static uint64_t total_sectors2 = 0;
+static char model2[41];
+static char serial2[21];
+static int needs_lba48_2 = 0;
 
 /*
  * IDENTIFY word indices (the payload is 256 16-bit words; words are
@@ -83,6 +127,18 @@ static inline uint16_t inw(uint16_t port)
     return value;
 }
 
+static inline void outl(uint16_t port, uint32_t value)
+{
+    __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port)
+{
+    uint32_t value;
+    __asm__ volatile ("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
 /* Tiny fixed-count busy-wait, used after drive-select before the
  * status register is trustworthy. Not calibrated to real time --
  * just enough I/O port reads to burn the ~400ns the spec wants. */
@@ -90,6 +146,12 @@ static void ata_io_delay(void)
 {
     for (int i = 0; i < 4; i++)
         inb(ATA_CONTROL);
+}
+
+static void ata2_io_delay(void)
+{
+    for (int i = 0; i < 4; i++)
+        inb(ATA2_CONTROL);
 }
 
 static int ata_wait_not_busy(void)
@@ -108,6 +170,32 @@ static int ata_wait_drq(void)
 {
     for (uint32_t spins = 0; spins < 1000000U; spins++) {
         uint8_t status = inb(ATA_STATUS);
+
+        if (status & ATA_STATUS_ERR)
+            return -1;
+
+        if (status & ATA_STATUS_DF)
+            return -1;
+
+        if (status & ATA_STATUS_DRQ)
+            return 0;
+    }
+    return -1;
+}
+
+static int ata2_wait_not_busy(void)
+{
+    for (uint32_t spins = 0; spins < 1000000U; spins++) {
+        if ((inb(ATA2_STATUS) & ATA_STATUS_BSY) == 0)
+            return 0;
+    }
+    return -1;
+}
+
+static int ata2_wait_drq(void)
+{
+    for (uint32_t spins = 0; spins < 1000000U; spins++) {
+        uint8_t status = inb(ATA2_STATUS);
 
         if (status & ATA_STATUS_ERR)
             return -1;
@@ -186,15 +274,117 @@ static void ata_parse_identify(const uint16_t *id)
                              &id[IDENTIFY_MODEL_W0], 20);
 }
 
+static void ata_parse_identify2(const uint16_t *id)
+{
+    uint32_t lba28 = (uint32_t)id[IDENTIFY_LBA28_TOTAL_W0] |
+                     ((uint32_t)id[IDENTIFY_LBA28_TOTAL_W1] << 16);
+
+    total_sectors2 = lba28;
+    needs_lba48_2 = 0;
+
+    if (id[49] & IDENTIFY_LBA48_VALID) {
+        uint64_t lba48 = (uint64_t)id[IDENTIFY_LBA48_TOTAL_W0] |
+                         ((uint64_t)id[IDENTIFY_LBA48_TOTAL_W1] << 16) |
+                         ((uint64_t)id[IDENTIFY_LBA48_TOTAL_W2] << 32) |
+                         ((uint64_t)id[IDENTIFY_LBA48_TOTAL_W3] << 48);
+
+        if (lba48 > 0)
+            total_sectors2 = lba48;
+    }
+
+    if (total_sectors2 > LBA28_MAX_SECTORS)
+        needs_lba48_2 = 1;
+
+    ata_copy_identify_string(serial2, sizeof(serial2),
+                             &id[IDENTIFY_SERIAL_W0], 10);
+    ata_copy_identify_string(model2, sizeof(model2),
+                             &id[IDENTIFY_MODEL_W0], 20);
+}
+
+static void print_hex32(uint32_t value)
+{
+    const char hex[] = "0123456789ABCDEF";
+    terminal_write("0x");
+    for (int i = 7; i >= 0; i--) {
+        uint8_t digit = (value >> (i * 4)) & 0xF;
+        terminal_putchar(hex[digit]);
+    }
+}
+
+/* DMA PRDT entry: 8 bytes (physical address + byte count + EOT flag) */
+static int dma_init(void)
+{
+    /* Allocate a physically contiguous PRDT (Physical Region Descriptor Table)
+     * We need one PRDT per transfer, max 16 entries = 128 bytes.
+     * The PRDT must not cross a 64KB boundary. */
+    dma_prdt_phys = frame_alloc();
+    if (dma_prdt_phys == FRAME_INVALID || dma_prdt_phys >= PAGING_IDENTITY_LIMIT) {
+        if (dma_prdt_phys != FRAME_INVALID)
+            frame_free(dma_prdt_phys);
+        console_warn("DMA: PRDT allocation failed");
+        return -1;
+    }
+
+    dma_prdt = (uint16_t *)dma_prdt_phys;
+    console_info("DMA: PRDT allocated at 0x");
+    print_hex32(dma_prdt_phys);
+    terminal_putchar('\n');
+
+    return 0;
+}
+
+static void dma_setup_prdt(void *buffer, uint32_t byte_count, int is_write)
+{
+    /* We use a single PRDT entry for simplicity (max 64KB per entry) */
+    uint32_t phys = (uint32_t)buffer;
+    uint32_t remaining = byte_count;
+    uint32_t *prdt = (uint32_t *)dma_prdt;
+
+    /* Each PRDT entry: 4 bytes addr, 4 bytes count (with EOT flag in bit 31) */
+    while (remaining > 0) {
+        uint32_t chunk = remaining;
+        if (chunk > 65536)
+            chunk = 65536;
+
+        /* Address (4 bytes) */
+        *prdt++ = phys;
+
+        /* Byte count (4 bytes) with EOT flag */
+        uint32_t count_val = chunk;
+        if (chunk == remaining)
+            count_val |= 0x80000000;  /* EOT flag */
+        *prdt++ = count_val;
+
+        phys += chunk;
+        remaining -= chunk;
+    }
+}
+
 void ata_init(void)
 {
     drive_ready = 0;
+    drive_ready2 = 0;
     total_sectors = 0;
+    total_sectors2 = 0;
     needs_lba48 = 0;
+    needs_lba48_2 = 0;
     model[0] = '\0';
     serial[0] = '\0';
+    model2[0] = '\0';
+    serial2[0] = '\0';
+    dma_supported = 0;
+    dma_prdt_phys = 0;
+    dma_prdt = 0;
 
-    /* Select master drive, LBA mode, no bits of an LBA yet. */
+    /* Initialize DMA if possible */
+    if (dma_init() == 0) {
+        dma_supported = 1;
+        console_info("ATA: DMA support enabled");
+    } else {
+        console_warn("ATA: DMA not available, using PIO");
+    }
+
+    /* ---- Primary Master (0x1F0) ---- */
     outb(ATA_DRIVE_HEAD, 0xE0);
     ata_io_delay();
 
@@ -207,61 +397,79 @@ void ata_init(void)
     uint8_t status = inb(ATA_STATUS);
 
     if (status == 0) {
-        console_warn("ATA: no drive present (disk I/O disabled)");
-        return;
+        console_warn("ATA: no primary drive present");
+    } else if (ata_wait_not_busy() == 0) {
+        if (inb(ATA_LBA_MID) == 0 && inb(ATA_LBA_HIGH) == 0) {
+            if (ata_wait_drq() == 0) {
+                static uint16_t identify[IDENTIFY_WORDS];
+                for (int i = 0; i < IDENTIFY_WORDS; i++)
+                    identify[i] = inw(ATA_DATA);
+                ata_parse_identify(identify);
+
+                if (total_sectors != 0) {
+                    drive_ready = 1;
+                    console_info("ATA: primary master drive: OK");
+                    console_info("  model: ");
+                    terminal_write(model[0] ? model : "(unreported)");
+                    terminal_putchar('\n');
+                    console_info("  serial: ");
+                    terminal_write(serial[0] ? serial : "(unreported)");
+                    terminal_putchar('\n');
+                    console_info("  capacity: ");
+                    terminal_write_u32((uint32_t)(total_sectors * 512ULL / 1024U / 1024U));
+                    terminal_write(" MiB, ");
+                    terminal_write_u32((uint32_t)total_sectors);
+                    terminal_write(" sectors\n");
+                    if (needs_lba48) {
+                        console_warn("ATA: primary needs LBA48; only first 128 GiB addressable");
+                    }
+                }
+            }
+        }
     }
 
-    if (ata_wait_not_busy() != 0) {
-        console_warn("ATA: drive not responding (disk I/O disabled)");
-        return;
-    }
+    /* ---- Secondary Master (0x170) ---- */
+    outb(ATA2_DRIVE_HEAD, 0xE0);
+    ata2_io_delay();
 
-    /* A non-ATA (e.g. ATAPI) device reports its signature in the
-     * LBA mid/high ports instead of raising DRQ for IDENTIFY. */
-    if (inb(ATA_LBA_MID) != 0 || inb(ATA_LBA_HIGH) != 0) {
-        console_warn("ATA: non-ATA device present (disk I/O disabled)");
-        return;
-    }
+    outb(ATA2_SECCOUNT, 0);
+    outb(ATA2_LBA_LOW, 0);
+    outb(ATA2_LBA_MID, 0);
+    outb(ATA2_LBA_HIGH, 0);
+    outb(ATA2_COMMAND, ATA_CMD_IDENTIFY);
 
-    if (ata_wait_drq() != 0) {
-        console_warn("ATA: IDENTIFY failed (disk I/O disabled)");
-        return;
-    }
+    status = inb(ATA2_STATUS);
 
-    static uint16_t identify[IDENTIFY_WORDS];
+    if (status == 0) {
+        console_warn("ATA: no secondary drive present");
+    } else if (ata2_wait_not_busy() == 0) {
+        if (inb(ATA2_LBA_MID) == 0 && inb(ATA2_LBA_HIGH) == 0) {
+            if (ata2_wait_drq() == 0) {
+                static uint16_t identify2[IDENTIFY_WORDS];
+                for (int i = 0; i < IDENTIFY_WORDS; i++)
+                    identify2[i] = inw(ATA2_DATA);
+                ata_parse_identify2(identify2);
 
-    /* The DRQ must be drained either way; keep it for parsing. */
-    for (int i = 0; i < IDENTIFY_WORDS; i++)
-        identify[i] = inw(ATA_DATA);
-
-    ata_parse_identify(identify);
-
-    if (total_sectors == 0) {
-        console_warn("ATA: drive reports zero capacity (disk I/O disabled)");
-        return;
-    }
-
-    drive_ready = 1;
-    console_info("ATA: primary master drive: OK");
-    console_info("  model: ");
-    terminal_write(model[0] ? model : "(unreported)");
-    terminal_putchar('\n');
-    console_info("  serial: ");
-    terminal_write(serial[0] ? serial : "(unreported)");
-    terminal_putchar('\n');
-    console_info("  capacity: ");
-    terminal_write_u32((uint32_t)(ata_total_bytes() / 1024U / 1024U));
-    terminal_write(" MiB, ");
-    terminal_write_u32((uint32_t)total_sectors);
-    terminal_write(" sectors\n");
-
-    if (needs_lba48) {
-        /*
-         * Not fatal for correctness as long as nothing addresses
-         * past 128 GiB, but the disk is larger than this driver can
-         * reach, so say so rather than pretending it is all there.
-         */
-        console_warn("ATA: drive needs LBA48; only the first 128 GiB are addressable");
+                if (total_sectors2 != 0) {
+                    drive_ready2 = 1;
+                    console_info("ATA: secondary master drive: OK");
+                    console_info("  model: ");
+                    terminal_write(model2[0] ? model2 : "(unreported)");
+                    terminal_putchar('\n');
+                    console_info("  serial: ");
+                    terminal_write(serial2[0] ? serial2 : "(unreported)");
+                    terminal_putchar('\n');
+                    console_info("  capacity: ");
+                    terminal_write_u32((uint32_t)(total_sectors2 * 512ULL / 1024U / 1024U));
+                    terminal_write(" MiB, ");
+                    terminal_write_u32((uint32_t)total_sectors2);
+                    terminal_write(" sectors\n");
+                    if (needs_lba48_2) {
+                        console_warn("ATA: secondary needs LBA48; only first 128 GiB addressable");
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -293,6 +501,42 @@ const char *ata_serial(void)
 int ata_requires_lba48(void)
 {
     return needs_lba48;
+}
+
+/* Secondary drive getters */
+int ata2_is_ready(void)
+{
+    return drive_ready2;
+}
+
+uint64_t ata2_total_sectors(void)
+{
+    return total_sectors2;
+}
+
+uint64_t ata2_total_bytes(void)
+{
+    return total_sectors2 * 512ULL;
+}
+
+const char *ata2_model(void)
+{
+    return model2;
+}
+
+const char *ata2_serial(void)
+{
+    return serial2;
+}
+
+int ata2_requires_lba48(void)
+{
+    return needs_lba48_2;
+}
+
+int ata_dma_supported(void)
+{
+    return dma_supported;
 }
 
 int ata_check_range(uint32_t lba, uint32_t count)
@@ -327,6 +571,126 @@ static int ata_select_lba(uint32_t lba, uint8_t count)
     return 0;
 }
 
+static int ata2_select_lba(uint32_t lba, uint8_t count)
+{
+    if (ata2_wait_not_busy() != 0)
+        return -1;
+
+    outb(ATA2_DRIVE_HEAD, (uint8_t)(0xE0 | ((lba >> 24) & 0x0F)));
+    ata2_io_delay();
+
+    outb(ATA2_SECCOUNT, count);
+    outb(ATA2_LBA_LOW, (uint8_t)(lba & 0xFF));
+    outb(ATA2_LBA_MID, (uint8_t)((lba >> 8) & 0xFF));
+    outb(ATA2_LBA_HIGH, (uint8_t)((lba >> 16) & 0xFF));
+
+    return 0;
+}
+
+static int ata_dma_read(uint32_t lba, uint8_t count, void *buffer)
+{
+    if (!dma_supported || dma_prdt == 0)
+        return -1;
+
+    uint32_t byte_count = count * 512;
+
+    /* Setup PRDT */
+    dma_setup_prdt(buffer, byte_count, 0);
+
+    /* Program the PRDT address */
+    outl(ATA_BM_PRDT, dma_prdt_phys);
+
+    /* Clear status */
+    outb(ATA_BM_STATUS, ATA_BM_STATUS_INTR | ATA_BM_STATUS_ERR);
+
+    /* Select drive and LBA */
+    if (ata_select_lba(lba, count) != 0)
+        return -1;
+
+    /* Issue DMA read command */
+    outb(ATA_COMMAND, ATA_CMD_READ_DMA);
+
+    /* Start DMA transfer */
+    outb(ATA_BM_COMMAND, ATA_BM_CMD_START);
+
+    /* Wait for completion */
+    for (uint32_t spins = 0; spins < 1000000U; spins++) {
+        uint8_t status = inb(ATA_BM_STATUS);
+        if (status & ATA_BM_STATUS_INTR) {
+            /* DMA completed */
+            break;
+        }
+        if (status & ATA_BM_STATUS_ERR) {
+            console_error("DMA: transfer error");
+            outb(ATA_BM_COMMAND, 0);  /* Stop DMA */
+            return -1;
+        }
+    }
+
+    /* Stop DMA */
+    outb(ATA_BM_COMMAND, 0);
+
+    /* Wait for drive to be ready */
+    if (ata_wait_not_busy() != 0)
+        return -1;
+
+    return 0;
+}
+
+static int ata_dma_write(uint32_t lba, uint8_t count, const void *buffer)
+{
+    if (!dma_supported || dma_prdt == 0)
+        return -1;
+
+    uint32_t byte_count = count * 512;
+
+    /* Setup PRDT */
+    dma_setup_prdt((void *)buffer, byte_count, 1);
+
+    /* Program the PRDT address */
+    outl(ATA_BM_PRDT, dma_prdt_phys);
+
+    /* Clear status */
+    outb(ATA_BM_STATUS, ATA_BM_STATUS_INTR | ATA_BM_STATUS_ERR);
+
+    /* Select drive and LBA */
+    if (ata_select_lba(lba, count) != 0)
+        return -1;
+
+    /* Issue DMA write command */
+    outb(ATA_COMMAND, ATA_CMD_WRITE_DMA);
+
+    /* Start DMA transfer */
+    outb(ATA_BM_COMMAND, ATA_BM_CMD_START | ATA_BM_CMD_WRITE);
+
+    /* Wait for completion */
+    for (uint32_t spins = 0; spins < 1000000U; spins++) {
+        uint8_t status = inb(ATA_BM_STATUS);
+        if (status & ATA_BM_STATUS_INTR) {
+            break;
+        }
+        if (status & ATA_BM_STATUS_ERR) {
+            console_error("DMA: transfer error");
+            outb(ATA_BM_COMMAND, 0);
+            return -1;
+        }
+    }
+
+    /* Stop DMA */
+    outb(ATA_BM_COMMAND, 0);
+
+    /* Wait for drive to be ready */
+    if (ata_wait_not_busy() != 0)
+        return -1;
+
+    /* Flush cache */
+    outb(ATA_COMMAND, ATA_CMD_FLUSH);
+    if (ata_wait_not_busy() != 0)
+        return -1;
+
+    return 0;
+}
+
 int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer)
 {
     if (buffer == 0)
@@ -334,6 +698,13 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer)
 
     if (ata_check_range(lba, count) != 0)
         return -1;
+
+    /* Try DMA first if supported */
+    if (dma_supported && dma_prdt != 0) {
+        if (ata_dma_read(lba, count, buffer) == 0)
+            return 0;
+        console_warn("DMA read failed, falling back to PIO");
+    }
 
     if (ata_select_lba(lba, count) != 0)
         return -1;
@@ -356,6 +727,34 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer)
     return 0;
 }
 
+int ata2_read_sectors(uint32_t lba, uint8_t count, void *buffer)
+{
+    if (buffer == 0)
+        return -1;
+
+    if (ata2_check_range(lba, count) != 0)
+        return -1;
+
+    if (ata2_select_lba(lba, count) != 0)
+        return -1;
+
+    outb(ATA2_COMMAND, ATA_CMD_READ);
+
+    uint16_t *dst = (uint16_t *)buffer;
+
+    for (uint8_t sector = 0; sector < count; sector++) {
+        if (ata2_wait_drq() != 0)
+            return -1;
+
+        for (int word = 0; word < 256; word++)
+            dst[word] = inw(ATA2_DATA);
+
+        dst += 256;
+    }
+
+    return 0;
+}
+
 int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer)
 {
     if (buffer == 0)
@@ -363,6 +762,13 @@ int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer)
 
     if (ata_check_range(lba, count) != 0)
         return -1;
+
+    /* Try DMA first if supported */
+    if (dma_supported && dma_prdt != 0) {
+        if (ata_dma_write(lba, count, buffer) == 0)
+            return 0;
+        console_warn("DMA write failed, falling back to PIO");
+    }
 
     if (ata_select_lba(lba, count) != 0)
         return -1;
@@ -395,6 +801,56 @@ int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer)
     return 0;
 }
 
+int ata2_write_sectors(uint32_t lba, uint8_t count, const void *buffer)
+{
+    if (buffer == 0)
+        return -1;
+
+    if (ata2_check_range(lba, count) != 0)
+        return -1;
+
+    if (ata2_select_lba(lba, count) != 0)
+        return -1;
+
+    outb(ATA2_COMMAND, ATA_CMD_WRITE);
+
+    const uint16_t *src = (const uint16_t *)buffer;
+
+    for (uint8_t sector = 0; sector < count; sector++) {
+        if (ata2_wait_drq() != 0)
+            return -1;
+
+        for (int word = 0; word < 256; word++)
+            outw(ATA2_DATA, src[word]);
+
+        src += 256;
+    }
+
+    if (ata2_wait_not_busy() != 0)
+        return -1;
+
+    outb(ATA2_COMMAND, ATA_CMD_FLUSH);
+
+    if (ata2_wait_not_busy() != 0)
+        return -1;
+
+    return 0;
+}
+
+int ata2_check_range(uint32_t lba, uint32_t count)
+{
+    if (!drive_ready2 || count == 0)
+        return -1;
+
+    if ((uint64_t)lba + (uint64_t)count > total_sectors2)
+        return -1;
+
+    if (needs_lba48_2 && (uint64_t)lba + (uint64_t)count > LBA28_MAX_SECTORS)
+        return -1;
+
+    return 0;
+}
+
 /*
  * Self-test.
  *
@@ -409,48 +865,48 @@ int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer)
 int ata_run_self_test(void)
 {
     if (!drive_ready) {
-        console_error("ATA self-test: no drive present");
+        console_error("ATA self-test: no primary drive present");
         return 0;
     }
 
     if (total_sectors == 0) {
-        console_error("ATA self-test: capacity is zero");
+        console_error("ATA self-test: primary capacity is zero");
         return 0;
     }
 
     if (ata_total_bytes() != total_sectors * 512ULL) {
-        console_error("ATA self-test: byte/sector mismatch");
+        console_error("ATA self-test: primary byte/sector mismatch");
         return 0;
     }
 
     /* A range entirely inside the drive must be accepted. */
     if (ata_check_range(0, 1) != 0) {
-        console_error("ATA self-test: LBA 0 wrongly rejected");
+        console_error("ATA self-test: primary LBA 0 wrongly rejected");
         return 0;
     }
 
     /* The very last sector must be reachable. */
     if (ata_check_range((uint32_t)(total_sectors - 1), 1) != 0) {
-        console_error("ATA self-test: final sector wrongly rejected");
+        console_error("ATA self-test: primary final sector wrongly rejected");
         return 0;
     }
 
     /* One sector past the end must be refused. */
     if (ata_check_range((uint32_t)total_sectors, 1) == 0) {
-        console_error("ATA self-test: out-of-range LBA wrongly accepted");
+        console_error("ATA self-test: primary out-of-range LBA wrongly accepted");
         return 0;
     }
 
     /* A range that starts inside but runs past the end must be
      * refused, and must not wrap back into range. */
     if (ata_check_range((uint32_t)total_sectors, 2) == 0) {
-        console_error("ATA self-test: wrapping range wrongly accepted");
+        console_error("ATA self-test: primary wrapping range wrongly accepted");
         return 0;
     }
 
     if (total_sectors > 1 &&
         ata_check_range((uint32_t)(total_sectors - 1), 2) == 0) {
-        console_error("ATA self-test: straddling range wrongly accepted");
+        console_error("ATA self-test: primary straddling range wrongly accepted");
         return 0;
     }
 
@@ -458,20 +914,29 @@ int ata_run_self_test(void)
     static uint8_t sector[512];
 
     if (ata_read_sectors(0, 1, sector) != 0) {
-        console_error("ATA self-test: read of LBA 0 failed");
+        console_error("ATA self-test: primary read of LBA 0 failed");
         return 0;
     }
 
     if (ata_read_sectors((uint32_t)total_sectors, 1, sector) == 0) {
-        console_error("ATA self-test: out-of-range read wrongly succeeded");
+        console_error("ATA self-test: primary out-of-range read wrongly succeeded");
         return 0;
     }
 
-    console_info("ATA self-test: ");
+    console_info("ATA self-test: primary ");
     terminal_write_u32((uint32_t)(ata_total_bytes() / 1024U / 1024U));
     terminal_write(" MiB, model '");
     terminal_write(model[0] ? model : "(unreported)");
     terminal_write("'\n");
+
+    /* Test secondary drive if present */
+    if (drive_ready2) {
+        if (ata2_read_sectors(0, 1, sector) != 0) {
+            console_error("ATA self-test: secondary read of LBA 0 failed");
+            return 0;
+        }
+        console_info("ATA self-test: secondary OK");
+    }
 
     return 1;
 }

@@ -7,6 +7,8 @@
 #include "heap.h"
 #include "rtc.h"
 #include "lock.h"
+#include "frame.h"
+#include "paging.h"
 
 /*
  * LumenFS v2 driver.
@@ -860,6 +862,42 @@ static int fs_parent_of(uint32_t ino, uint32_t *out_parent,
  * want_type, when non-zero, requires the final component to be of
  * that type (FS_TYPE_FILE or FS_TYPE_DIR).
  */
+static int fs_readlink_internal(uint32_t ino, char *buf, uint32_t buf_size)
+{
+    fs_inode_t in;
+    int rc = fs_inode_read(ino, &in);
+
+    if (rc != FS_OK)
+        return rc;
+
+    if (in.type != FS_TYPE_SYMLINK)
+        return FS_EINVAL;
+
+    uint32_t target_len = in.size;
+    if (target_len >= 256)
+        return FS_EINVAL;
+
+    uint32_t blocks = fs_blocks_for_bytes(in.size);
+    uint32_t read = 0;
+
+    for (uint32_t b = 0; b < blocks; b++) {
+        if (in.direct[b] == FS_BLOCK_NONE)
+            return FS_EIO;
+
+        uint8_t *blk_src = (uint8_t *)in.direct[b];
+        uint32_t chunk = (in.size > FS_BLOCK_SIZE) ? FS_BLOCK_SIZE : in.size;
+        if (read + chunk >= 256)
+            return FS_EINVAL;
+
+        for (uint32_t k = 0; k < chunk; k++)
+            buf[read++] = ((uint8_t *)in.direct[b])[k];
+        in.size -= chunk;
+    }
+
+    buf[read] = '\0';
+    return FS_OK;
+}
+
 static int fs_resolve(const char *path, uint32_t *out_inode,
                       int want_type)
 {
@@ -936,6 +974,37 @@ static int fs_resolve(const char *path, uint32_t *out_inode,
 
         if (rc != FS_OK)
             return rc;
+
+        /* Handle symlinks: if the current node is a symlink and there's
+         * more path to resolve, follow the symlink. */
+        while (node.type == FS_TYPE_SYMLINK) {
+            char target[256];
+            rc = fs_readlink_internal(current, target, sizeof(target));
+
+            if (rc != FS_OK)
+                return rc;
+
+            /* If there's more path to resolve, restart from root. */
+            const char *skip = cursor;
+
+            while (*skip == '/')
+                skip++;
+
+            if (*skip == '\0') {
+                /* Symlink is the final component; we're done. */
+                break;
+            }
+
+            /* Restart resolution from root with the symlink target. */
+            current = sb.root_inode;
+            rc = fs_inode_read(current, &node);
+
+            if (rc != FS_OK)
+                return rc;
+
+            cursor = target;
+            continue;
+        }
 
         /* More path left: the current node must be a directory. */
         const char *skip = cursor;
@@ -1680,7 +1749,339 @@ int fs_rmdir(const char *path, fs_cred_t cred)
     if (rc != FS_OK)
         return rc;
 
-    return bitmap_flush();
+return bitmap_flush();
+}
+
+/* ---- Directory listing --------------------------------------------- */
+
+/* Create a symbolic link. The target path is stored as the file
+ * contents of a special inode of type FS_TYPE_SYMLINK. */
+int fs_symlink(const char *target, const char *linkpath, fs_cred_t cred)
+{
+    if (target == 0 || linkpath == 0)
+        return FS_EINVAL;
+
+    uint32_t target_len = 0;
+    while (target[target_len] != '\0' && target_len < FS_MAX_FILE_SIZE)
+        target_len++;
+
+    if (target_len == 0 || target_len >= FS_MAX_FILE_SIZE)
+        return FS_EINVAL;
+
+    FS_LOCK();
+
+    char parent_path[FS_PATH_MAX];
+    char name[FS_NAME_MAX];
+    uint32_t name_len = 0;
+
+    int rc = fs_split_path(linkpath, parent_path, sizeof(parent_path),
+                           name, &name_len);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    uint32_t parent_ino = FS_BLOCK_NONE;
+    rc = fs_resolve(parent_path, &parent_ino, FS_TYPE_DIR);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    fs_inode_t parent;
+    rc = fs_inode_read(parent_ino, &parent);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    rc = fs_require(&parent, cred, FS_PERM_OWNER_W);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    rc = fs_require(&parent, cred, FS_PERM_OWNER_X);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    /* Check if the name already exists. */
+    rc = fs_dirent_find(&parent, name, name_len, 0);
+
+    if (rc == FS_OK) {
+        FS_UNLOCK();
+        return FS_EEXIST;
+    }
+
+    /* Allocate a new inode for the symlink. */
+    uint32_t ino = fs_inode_alloc();
+
+    if (ino == FS_BLOCK_NONE) {
+        FS_UNLOCK();
+        return FS_ENOSPC;
+    }
+
+    /* Write the target path as the file contents. */
+    uint32_t blocks_needed = fs_blocks_for_bytes(target_len);
+    if (blocks_needed > FS_DIRECT_BLOCKS) {
+        fs_inode_free(ino);
+        FS_UNLOCK();
+        return FS_ENOSPC;
+    }
+
+    fs_inode_t in;
+    for (uint32_t i = 0; i < FS_DIRECT_BLOCKS; i++)
+        in.direct[i] = FS_BLOCK_NONE;
+    in.indirect = FS_BLOCK_NONE;
+
+    in.type = FS_TYPE_SYMLINK;
+    in.mode = FS_MODE_FILE_DEFAULT;
+    in.uid = cred.uid;
+    in.gid = cred.gid;
+    in.size = target_len;
+    in.mtime = 0;
+    in.flags = 0;
+
+    /* Allocate blocks and write the target path. */
+    for (uint32_t b = 0; b < blocks_needed; b++) {
+        uint32_t blk = frame_alloc();
+        if (blk == FRAME_INVALID || blk >= PAGING_IDENTITY_LIMIT) {
+            for (uint32_t j = 0; j < b; j++)
+                frame_free(in.direct[j]);
+            fs_inode_free(ino);
+            FS_UNLOCK();
+            return FS_ENOSPC;
+        }
+        in.direct[b] = blk;
+
+        uint8_t *blk_dst = (uint8_t *)blk;
+        uint32_t chunk = (target_len > FS_BLOCK_SIZE) ? FS_BLOCK_SIZE : target_len;
+        for (uint32_t k = 0; k < chunk; k++)
+            blk_dst[k] = target[k];
+        target += chunk;
+        target_len -= chunk;
+    }
+
+    fs_inode_touch(&in);
+    rc = fs_inode_write(ino, &in);
+
+    if (rc != FS_OK) {
+        for (uint32_t b = 0; b < blocks_needed; b++)
+            frame_free(in.direct[b]);
+        fs_inode_free(ino);
+        FS_UNLOCK();
+        return rc;
+    }
+
+    /* Add directory entry. */
+    rc = fs_dirent_add(&parent, ino, FS_TYPE_SYMLINK, name, name_len);
+
+    if (rc != FS_OK) {
+        for (uint32_t b = 0; b < blocks_needed; b++)
+            frame_free(in.direct[b]);
+        fs_inode_free(ino);
+        FS_UNLOCK();
+        return rc;
+    }
+
+    fs_inode_touch(&parent);
+    rc = fs_inode_write(parent_ino, &parent);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    rc = bitmap_flush();
+    FS_UNLOCK();
+    return rc;
+}
+
+/* Read the target of a symbolic link. */
+int fs_readlink(const char *linkpath, fs_cred_t cred, char *buf, uint32_t buf_size)
+{
+    if (linkpath == 0 || buf == 0 || buf_size == 0)
+        return FS_EINVAL;
+
+    FS_LOCK();
+
+    uint32_t ino = FS_BLOCK_NONE;
+    int rc = fs_resolve(linkpath, &ino, FS_TYPE_SYMLINK);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    fs_inode_t in;
+    rc = fs_inode_read(ino, &in);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    rc = fs_require(&in, cred, FS_PERM_OWNER_R);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    uint32_t target_len = in.size;
+    if (target_len >= buf_size) {
+        FS_UNLOCK();
+        return FS_EINVAL;
+    }
+
+    /* Read the target path from the file contents. */
+    uint32_t blocks = fs_blocks_for_bytes(target_len);
+    uint32_t read = 0;
+
+    for (uint32_t b = 0; b < blocks; b++) {
+        if (in.direct[b] == FS_BLOCK_NONE) {
+            FS_UNLOCK();
+            return FS_EIO;
+        }
+
+        uint8_t *blk_src = (uint8_t *)in.direct[b];
+        uint32_t chunk = (target_len > FS_BLOCK_SIZE) ? FS_BLOCK_SIZE : target_len;
+        if (read + chunk > buf_size - 1) {
+            FS_UNLOCK();
+            return FS_EINVAL;
+        }
+
+        for (uint32_t k = 0; k < chunk; k++)
+            buf[read++] = blk_src[k];
+        target_len -= chunk;
+    }
+
+    buf[read] = '\0';
+
+    FS_UNLOCK();
+    return FS_OK;
+}
+
+/* Create a hard link to an existing file. This adds another
+ * directory entry pointing to the same inode. */
+int fs_link(const char *existing_path, const char *new_path, fs_cred_t cred)
+{
+    if (existing_path == 0 || new_path == 0)
+        return FS_EINVAL;
+
+    FS_LOCK();
+
+    /* Resolve the existing file's inode. */
+    uint32_t existing_ino = FS_BLOCK_NONE;
+    int rc = fs_resolve(existing_path, &existing_ino, 0);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    fs_inode_t existing;
+    rc = fs_inode_read(existing_ino, &existing);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    /* Only allow hard links to regular files (not directories or symlinks). */
+    if (existing.type != FS_TYPE_FILE) {
+        FS_UNLOCK();
+        return FS_EINVAL;
+    }
+
+    rc = fs_require(&existing, cred, FS_PERM_OWNER_R);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    /* Parse the new path. */
+    char parent_path[FS_PATH_MAX];
+    char name[FS_NAME_MAX];
+    uint32_t name_len = 0;
+
+    rc = fs_split_path(new_path, parent_path, sizeof(parent_path),
+                       name, &name_len);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    uint32_t parent_ino = FS_BLOCK_NONE;
+    rc = fs_resolve(parent_path, &parent_ino, FS_TYPE_DIR);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    fs_inode_t parent;
+    rc = fs_inode_read(parent_ino, &parent);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    rc = fs_require(&parent, cred, FS_PERM_OWNER_W);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    rc = fs_require(&parent, cred, FS_PERM_OWNER_X);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    /* Check if the name already exists. */
+    rc = fs_dirent_find(&parent, name, name_len, 0);
+
+    if (rc == FS_OK) {
+        FS_UNLOCK();
+        return FS_EEXIST;
+    }
+
+    /* Add directory entry pointing to the same inode. */
+    rc = fs_dirent_add(&parent, existing_ino, FS_TYPE_FILE, name, name_len);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    /* Increment the inode's link count. We don't have a link count field
+     * in the inode yet, so we just note that the file has multiple links.
+     * The inode is only freed when the last link is removed (in fs_delete). */
+
+    fs_inode_touch(&parent);
+    rc = fs_inode_write(parent_ino, &parent);
+
+    if (rc != FS_OK) {
+        FS_UNLOCK();
+        return rc;
+    }
+
+    rc = bitmap_flush();
+    FS_UNLOCK();
+    return rc;
 }
 
 /* ---- Directory listing --------------------------------------------- */
