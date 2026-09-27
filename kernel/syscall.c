@@ -68,6 +68,34 @@ void syscall_handler(uint32_t *frame)
             break;
         }
 
+        case SYS_EXIT:
+        {
+            /*
+             * task_exit() marks the current process terminated.
+             * The timer interrupt will select another runnable
+             * task and the terminated task will never be scheduled
+             * again until its parent collects the slot.
+             */
+            frame[7] =
+                (task_exit() == 0) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_WAIT:
+        {
+            /*
+             * EAX = SYS_WAIT
+             * EBX = child PID
+             */
+            uint32_t child_id = frame[4];
+
+            frame[7] =
+                (task_wait(child_id) >= 0)
+                    ? child_id
+                    : 0xFFFFFFFFU;
+            break;
+        }
+
         default:
             frame[7] = 0xFFFFFFFFU;
             console_error(

@@ -3,6 +3,7 @@
 #include "heap.h"
 #include "paging.h"
 #include "console.h"
+#include "lock.h"
 
 #define HEAP_ALIGN 8U
 #define HEAP_MAGIC 0x48454150U
@@ -197,7 +198,13 @@ void heap_init(void)
     heap_head->prev = 0;
 }
 
-void *kmalloc(uint32_t size)
+/*
+ * The body of kmalloc(), split out so krealloc() can call it without
+ * re-entering the interrupt-disable that the public wrapper already
+ * holds. See lock.h for why disabling interrupts is sufficient
+ * exclusion on this single-processor kernel.
+ */
+static void *heap_alloc_locked(uint32_t size)
 {
     if (size == 0)
         return 0;
@@ -275,7 +282,24 @@ void *kmalloc(uint32_t size)
         header;
 }
 
-void kfree(void *pointer)
+void *kmalloc(uint32_t size)
+{
+    irqflags_t flags =
+        irq_save_disable();
+
+    void *result =
+        heap_alloc_locked(size);
+
+    irq_restore(flags);
+
+    return result;
+}
+
+/*
+ * The body of kfree(), split for the same reason as
+ * heap_alloc_locked().
+ */
+static void heap_free_locked(void *pointer)
 {
     if (!pointer)
         return;
@@ -318,16 +342,40 @@ void kfree(void *pointer)
     coalesce(block);
 }
 
+void kfree(void *pointer)
+{
+    irqflags_t flags =
+        irq_save_disable();
+
+    heap_free_locked(pointer);
+
+    irq_restore(flags);
+}
+
 void *krealloc(
     void *pointer,
     uint32_t size
 )
 {
-    if (!pointer)
-        return kmalloc(size);
+    /*
+     * One critical section for the whole operation: krealloc both
+     * allocates and frees, so taking the lock per public call would
+     * deadlock against itself.
+     */
+    irqflags_t flags =
+        irq_save_disable();
+
+    if (!pointer) {
+        void *fresh =
+            heap_alloc_locked(size);
+
+        irq_restore(flags);
+        return fresh;
+    }
 
     if (size == 0) {
-        kfree(pointer);
+        heap_free_locked(pointer);
+        irq_restore(flags);
         return 0;
     }
 
@@ -340,11 +388,15 @@ void *krealloc(
          header);
 
     if (block->magic !=
-        HEAP_MAGIC)
+        HEAP_MAGIC) {
+        irq_restore(flags);
         return 0;
+    }
 
-    if (block->free)
+    if (block->free) {
+        irq_restore(flags);
         return 0;
+    }
 
     size = align_up(size);
 
@@ -366,14 +418,17 @@ void *krealloc(
             size
         );
 
+        irq_restore(flags);
         return pointer;
     }
 
     void *replacement =
-        kmalloc(size);
+        heap_alloc_locked(size);
 
-    if (!replacement)
+    if (!replacement) {
+        irq_restore(flags);
         return 0;
+    }
 
     uint32_t copy =
         block->size < size
@@ -391,30 +446,55 @@ void *krealloc(
          ++i)
         dst[i] = src[i];
 
-    kfree(pointer);
+    heap_free_locked(pointer);
+
+    irq_restore(flags);
 
     return replacement;
 }
 
 uint32_t heap_used(void)
 {
-    return heap_used_bytes;
+    irqflags_t flags =
+        irq_save_disable();
+
+    uint32_t value =
+        heap_used_bytes;
+
+    irq_restore(flags);
+
+    return value;
 }
 
 uint32_t heap_free(void)
 {
+    irqflags_t flags =
+        irq_save_disable();
+
+    uint32_t value = 0;
+
     if (heap_committed_bytes >=
         heap_used_bytes)
-        return
+        value =
             heap_committed_bytes -
             heap_used_bytes;
 
-    return 0;
+    irq_restore(flags);
+
+    return value;
 }
 
 uint32_t heap_committed(void)
 {
-    return heap_committed_bytes;
+    irqflags_t flags =
+        irq_save_disable();
+
+    uint32_t value =
+        heap_committed_bytes;
+
+    irq_restore(flags);
+
+    return value;
 }
 
 int heap_run_self_test(void)

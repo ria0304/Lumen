@@ -14,7 +14,9 @@
 #include "task.h"
 #include "privilege.h"
 #include "ata.h"
+#include "rtc.h"
 #include "fs.h"
+#include "serial.h"
 
 extern void kbd_init(void);
 
@@ -22,6 +24,30 @@ extern void kbd_init(void);
 #define VGA_COLOR 0x07
 
 volatile uint32_t timer_ticks = 0;
+
+static uint32_t self_tests_passed = 0;
+static uint32_t self_tests_failed = 0;
+
+/*
+ * Single reporting point for every boot self-test. The uniform
+ * "SELFTEST <label> PASS/FAIL" line is what 'make test' greps for
+ * on the serial mirror, so the format here is load-bearing: keep the
+ * prefix and the PASS/FAIL words exactly as they are.
+ *
+ * Every *_run_self_test() in this codebase follows the shell's
+ * convention: 0 means a check failed, non-zero means it passed.
+ */
+static void report_self_test(const char *label, int rc)
+{
+    terminal_write("SELFTEST ");
+    terminal_write(label);
+    terminal_write(rc != 0 ? " PASS\n" : " FAIL\n");
+
+    if (rc != 0)
+        self_tests_passed++;
+    else
+        self_tests_failed++;
+}
 
 static void print_hex32(uint32_t value)
 {
@@ -160,11 +186,21 @@ void exception_handler(
 
 void irq_unhandled_handler(uint32_t irq)
 {
+    /*
+     * A spurious interrupt has no cause to report, and acknowledging
+     * it would corrupt the PIC's in-service bookkeeping. pic_end_of_
+     * interrupt() already knows to skip the EOI in that case.
+     */
+    if (pic_is_spurious((uint8_t)irq)) {
+        pic_end_of_interrupt((uint8_t)irq);
+        return;
+    }
+
     terminal_write("[WARN] Unhandled hardware IRQ: ");
     print_hex32(irq);
     terminal_putchar('\n');
 
-    pic_send_eoi((uint8_t)irq);
+    pic_end_of_interrupt((uint8_t)irq);
 }
 
 void timer_handler(void)
@@ -210,13 +246,57 @@ void timer_handler(void)
     }
 
     /*
-     * Send End Of Interrupt to the master PIC.
+     * End of interrupt for IRQ0. Sent last so the scheduler work
+     * above completes before another timer interrupt can arrive.
      */
-    pic_send_eoi(0);
+    pic_end_of_interrupt(0);
 }
 
 void kmain(void)
 {
+    /*
+     * Serial first, before a single character is printed: every
+     * later line is mirrored here, and 'make test' reads nothing
+     * else.
+     *
+     * The single raw 'M' is a temporary probe proving kmain is
+     * entered at all, independent of the serial driver's state.
+     */
+    __asm__ volatile ("outb %%al, %%dx" : : "a"((char)'M'), "d"((unsigned short)0x3F8));
+
+    serial_init();
+
+    /*
+     * The IDT goes up immediately after serial, and that ordering is
+     * load-bearing.
+     *
+     * The boot sector hands us protected mode with the BIOS's
+     * real-mode IVT still loaded: base 0x0000, limit 0x03FF. Until
+     * idt_init() runs, every CPU exception therefore dispatches
+     * through physical address 0, which is a table of leftover BIOS
+     * interrupt handlers living at f000:xxxx. A fault in that window
+     * does not crash visibly -- it jumps the CPU into BIOS code, which
+     * eventually returns through a corrupted stack and lands back in
+     * entry.asm's halt loop with no output at all. That is exactly how
+     * this kernel used to fail: no serial output, EIP inside f000:xxxx
+     * at the halt, and a stack pointer that had wandered above the
+     * 0x90000 stack.
+     *
+     * Installing the IDT second means every subsequent init step --
+     * terminal_clear, tss_init, gdt_init, frame_init, paging_init -- is
+     * covered by real handlers that print the vector, error code and
+     * CR2 fault address, so a mistake reports itself instead of
+     * vanishing.
+     *
+     * Safe to do this before gdt_init(): idt_init() only references
+     * KERNEL_CODE_SEGMENT (0x08), and the boot GDT's index 1 is
+     * byte-identical to the kernel GDT's index 1 (0xFFFF / 0x9A /
+     * 0xCF), so the gates resolve correctly against both. tss_load()
+     * still has to wait for gdt_init(), because the TSS gate (0x28)
+     * exists only in the kernel GDT.
+     */
+    idt_init();
+
     terminal_clear();
 
     tss_init();
@@ -227,25 +307,11 @@ void kmain(void)
     console_info("VGA text driver: OK");
     console_info("Protected mode: 32-bit");
 
-    if (gdt_run_self_test()) {
-        console_info("GDT self-test: PASS");
-    } else {
-        console_error("GDT self-test: FAILED");
-    }
+    report_self_test("GDT", gdt_run_self_test());
+    report_self_test("TSS", tss_run_self_test());
 
-    if (tss_run_self_test()) {
-        console_info("TSS self-test: PASS");
-    } else {
-        console_error("TSS self-test: FAILED");
-    }
+    report_self_test("IDT", idt_run_self_test());
 
-    idt_init();
-
-    if (idt_run_self_test()) {
-        console_info("IDT self-test: PASS");
-    } else {
-        console_error("IDT self-test: FAILED");
-    }
 
     /*
      * The paging subsystem allocates dynamic page-table frames,
@@ -253,19 +319,11 @@ void kmain(void)
      */
     frame_init();
 
-    if (frame_run_self_test()) {
-        console_info("Frame allocator test: PASS");
-    } else {
-        console_error("Frame allocator test: FAILED");
-    }
+    report_self_test("FRAME", frame_run_self_test());
 
     paging_init();
 
-    if (paging_run_self_test()) {
-        console_info("Paging dynamic memory test: PASS");
-    } else {
-        console_error("Paging dynamic memory test: FAILED");
-    }
+    report_self_test("PAGING", paging_run_self_test());
 
     console_info("IDT initialized: OK");
 
@@ -285,19 +343,11 @@ void kmain(void)
 
     task_init();
 
-    if (task_run_self_test()) {
-        console_info("Task manager self-test: PASS");
-    } else {
-        console_error("Task manager self-test: FAILED");
-    }
+    report_self_test("TASK", task_run_self_test());
 
     scheduler_init();
 
-    if (scheduler_run_self_test()) {
-        console_info("Scheduler self-test: PASS");
-    } else {
-        console_error("Scheduler self-test: FAILED");
-    }
+    report_self_test("SCHEDULER", scheduler_run_self_test());
 
     heap_init();
     console_info("Memory allocator: OK");
@@ -305,15 +355,28 @@ void kmain(void)
     ata_init();
     fs_init();
 
-    if (!fs_is_mounted()) {
+    if (ata_is_ready()) {
+        report_self_test("ATA", ata_run_self_test());
+    } else {
+        terminal_write("SELFTEST ATA SKIP (no drive)\n");
+    }
+
+    report_self_test("RTC", rtc_run_self_test());
+
+    /*
+     * The filesystem self-test is only meaningful on a formatted
+     * disk, and an unformatted one is a normal first-boot state
+     * rather than a failure -- so it is skipped, not failed, when
+     * there is nothing to test.
+     */
+    if (fs_is_mounted()) {
+        report_self_test("FS", fs_self_test());
+    } else {
+        terminal_write("SELFTEST FS SKIP (unformatted)\n");
         console_warn("FS: run 'format' to initialize the disk");
     }
 
-    if (heap_run_self_test()) {
-        console_info("Heap self-test: PASS");
-    } else {
-        console_error("Heap self-test: FAILED");
-    }
+    report_self_test("HEAP", heap_run_self_test());
 
     char *buffer = (char *)kmalloc(64);
 
@@ -352,8 +415,29 @@ void kmain(void)
 
     console_info("Enabling timer + keyboard interrupts...");
 
+    /*
+     * One machine-readable summary line for the whole boot phase.
+     * 'make test' asserts on this and on the individual
+     * "SELFTEST <label> PASS" lines above it.
+     */
+    terminal_write("SELFTEST-SUMMARY pass=");
+    terminal_write_u32(self_tests_passed);
+    terminal_write(" fail=");
+    terminal_write_u32(self_tests_failed);
+    terminal_write("\n");
+
+    console_info("Boot self-tests complete");
+
     __asm__ volatile ("sti");
 
+#ifdef LUMEN_AUTOEXIT
+    /*
+     * Built only by 'make test'. Shut the machine down instead of
+     * idling so the harness does not have to wait on a timeout,
+     * and so QEMU's exit status carries the result.
+     */
+    qemu_exit(self_tests_failed == 0 ? 0 : 1);
+#endif
 
     for (;;) {
         __asm__ volatile ("hlt");

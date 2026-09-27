@@ -5,6 +5,8 @@
 #include "paging.h"
 #include "ring3.h"
 
+extern uint32_t scheduler_current_task(void);
+
 extern void task_demo_entry(void);
 
 static task_t tasks[MAX_TASKS + 1];
@@ -118,6 +120,7 @@ void task_init(void)
 {
     for (uint32_t i = 0; i <= MAX_TASKS; i++) {
         tasks[i].id = 0;
+        tasks[i].parent_id = 0;
         tasks[i].state = TASK_UNUSED;
         tasks[i].privilege = KERNEL_RING;
         tasks[i].page_directory = PAGE_DIRECTORY_ADDRESS;
@@ -146,6 +149,7 @@ void task_init(void)
      * tasks that DO take a privilege-changing interrupt.
      */
     tasks[0].id = 0;
+    tasks[0].parent_id = 0;
     tasks[0].state = TASK_RUNNING;
     tasks[0].privilege = KERNEL_RING;
     tasks[0].page_directory = PAGE_DIRECTORY_ADDRESS;
@@ -188,6 +192,7 @@ static int task_create_ring3_with_code(
         return -1;
 
     tasks[i].id = i;
+    tasks[i].parent_id = scheduler_current_task();
     tasks[i].state = TASK_READY;
     tasks[i].privilege = USER_RING;
 
@@ -320,6 +325,7 @@ int task_create_with_privilege(uint32_t privilege)
             continue;
 
         tasks[i].id = i;
+        tasks[i].parent_id = scheduler_current_task();
         tasks[i].state = TASK_READY;
         tasks[i].privilege = privilege;
         tasks[i].page_directory = PAGE_DIRECTORY_ADDRESS;
@@ -495,7 +501,6 @@ int task_terminate(uint32_t id)
         return -1;
 
     task_t *task = (task_t *)task_get(id);
-
     if (task == 0)
         return -1;
 
@@ -503,36 +508,16 @@ int task_terminate(uint32_t id)
         task->state == TASK_TERMINATED)
         return -1;
 
-    if (task->privilege == USER_RING &&
-        task->page_directory != PAGE_DIRECTORY_ADDRESS) {
-
-        __asm__ volatile ("cli");
-
-        /*
-         * If this task's directory is the one currently loaded
-         * in CR3 -- true when a task is being terminated from
-         * inside its own fault handler, before the scheduler has
-         * had a chance to switch away from it -- get CR3 off of
-         * it FIRST. paging_destroy_address_space() frees the
-         * directory's physical frame; tearing down the directory
-         * that is still actively translating every memory access
-         * this very code is making is what used to crash the
-         * kernel immediately after printing the termination
-         * message.
-         */
-        if (paging_current_directory() == task->page_directory) {
-            paging_switch_directory(PAGE_DIRECTORY_ADDRESS);
-        }
-
-        paging_destroy_address_space(
-            task->page_directory
-        );
-
-        task->page_directory = PAGE_DIRECTORY_ADDRESS;
-
-        __asm__ volatile ("sti");
-    }
-
+    /*
+     * Do NOT destroy the Ring 3 address space here.
+     *
+     * SYS_EXIT is executed while the CPU is still using the
+     * process address space. Destroying it before the syscall
+     * return path switches tasks would make iret return into
+     * unmapped user code.
+     *
+     * Resources are reclaimed by task_wait().
+     */
     task->state = TASK_TERMINATED;
 
     if (active_tasks > 0)
@@ -576,7 +561,6 @@ int task_wake(uint32_t id)
     return 0;
 }
 
-extern uint32_t scheduler_current_task(void);
 
 int task_yield(void)
 {
@@ -605,7 +589,85 @@ int task_exit(void)
     if (id == 0)
         return -1;
 
+    /*
+     * Only mark the task terminated here.
+     *
+     * The syscall assembly path immediately switches away from
+     * this task, so its address space remains valid until the
+     * parent calls task_wait().
+     */
     return task_terminate(id);
+}
+
+int task_wait(uint32_t child_id)
+{
+    uint32_t parent_id = scheduler_current_task();
+
+    if (parent_id > MAX_TASKS)
+        return -1;
+
+    if (child_id == 0 || child_id > MAX_TASKS)
+        return -1;
+
+    if (child_id == parent_id)
+        return -1;
+
+    task_t *child = (task_t *)task_get(child_id);
+    if (child == 0)
+        return -1;
+
+    /*
+     * Only a terminated child can be reaped.
+     */
+    if (child->parent_id != parent_id)
+        return -1;
+
+    if (child->state != TASK_TERMINATED)
+        return -1;
+
+    /*
+     * The child is no longer executing, so its Ring 3 address
+     * space can safely be destroyed now.
+     */
+    if (child->privilege == USER_RING &&
+        child->page_directory != PAGE_DIRECTORY_ADDRESS) {
+
+        __asm__ volatile ("cli");
+
+        if (paging_current_directory() == child->page_directory)
+            paging_switch_directory(PAGE_DIRECTORY_ADDRESS);
+
+        paging_destroy_address_space(child->page_directory);
+
+        child->page_directory = PAGE_DIRECTORY_ADDRESS;
+
+        __asm__ volatile ("sti");
+    }
+
+    /*
+     * Reclaim the process table slot.
+     */
+    child->id = 0;
+    child->parent_id = 0;
+    child->state = TASK_UNUSED;
+    child->privilege = KERNEL_RING;
+    child->page_directory = PAGE_DIRECTORY_ADDRESS;
+    child->stack_base = 0;
+    child->stack_size = 0;
+    child->switch_esp = 0;
+
+    child->context.eax = 0;
+    child->context.ebx = 0;
+    child->context.ecx = 0;
+    child->context.edx = 0;
+    child->context.esi = 0;
+    child->context.edi = 0;
+    child->context.ebp = 0;
+    child->context.esp = 0;
+    child->context.eip = 0;
+    child->context.eflags = 0x202;
+
+    return (int)child_id;
 }
 
 const task_t *task_get(uint32_t id)

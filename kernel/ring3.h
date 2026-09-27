@@ -27,6 +27,9 @@
 extern const uint8_t ring3_test_program[];
 extern const uint32_t ring3_test_program_size;
 
+extern const uint8_t ring3_exit_program[];
+extern const uint32_t ring3_exit_program_size;
+
 int ring3_init(void);
 int ring3_run_test(void);
 

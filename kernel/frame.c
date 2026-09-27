@@ -1,10 +1,21 @@
 #include <stdint.h>
 #include "frame.h"
+#include "paging.h"
 #include "console.h"
 
 static uint32_t frame_bitmap[FRAME_BITMAP_WORDS];
 static uint32_t free_frames;
 static uint32_t used_frames;
+
+/*
+ * End of the contiguous reserved region covering low memory, the
+ * kernel image, the master page directory/table and the legacy heap
+ * reservation. Nothing below this is ever allocatable, so frame_free()
+ * refuses it outright. Every reserve_range() call in frame_init() must
+ * end at or below this value -- keeping the bound named here is what
+ * stops the reservations and the free policy from drifting apart.
+ */
+#define FRAME_RESERVED_END 0x00210000U
 
 static inline uint32_t frame_index(uint32_t address)
 {
@@ -80,7 +91,20 @@ void frame_init(void)
     );
 
     /*
-     * Conservative kernel/early-runtime reservation.
+     * Kernel image, static page directory, and the first kernel page
+     * table.
+     *
+     * The master page directory and its single page table sit at
+     * 0x00100000/0x00101000 (PAGE_DIRECTORY_ADDRESS and
+     * PAGE_TABLE_ADDRESS in kernel/paging.h), inside this range. An
+     * earlier layout kept them at 0x00220000 while reserving
+     * 0x00210000-0x00212000 instead, which left the real directory
+     * allocatable -- a frame_alloc() for a Ring 3 page directory
+     * could land on the very address CR3 was pointing at.
+     *
+     * The range is reserved wholesale rather than naming the two
+     * pages so the free-policy check in frame_free() can stay a
+     * single lower-bound comparison.
      */
     reserve_range(
         0x00100000U,
@@ -88,21 +112,13 @@ void frame_init(void)
     );
 
     /*
-     * Current heap.
+     * Legacy heap reservation, and the end of the reserved region.
+     * See FRAME_RESERVED_END: frame_free() refuses anything below
+     * this address, so this range has to be the last thing reserved.
      */
     reserve_range(
         0x00200000U,
-        0x00210000U
-    );
-
-    /*
-     * Static page directory + first page table.
-     * Keep this region contiguous with the heap reservation
-     * so there is no allocator/free-policy mismatch.
-     */
-    reserve_range(
-        0x00210000U,
-        0x00212000U
+        FRAME_RESERVED_END
     );
 
     console_info(
@@ -143,9 +159,11 @@ int frame_free(uint32_t physical_address)
 
     /*
      * Never allow the allocator to release reserved
-     * boot/kernel/heap/paging memory.
+     * boot/kernel/heap/paging memory. The bound is the end of that
+     * reserved region (FRAME_RESERVED_END), not a separate constant,
+     * so it cannot drift out of step with frame_init().
      */
-    if (physical_address < 0x00212000U)
+    if (physical_address < FRAME_RESERVED_END)
         return -1;
 
     uint32_t index =
@@ -200,34 +218,71 @@ int frame_run_self_test(void)
         frame_alloc();
 
     if (first == FRAME_INVALID ||
-        second == FRAME_INVALID)
+        second == FRAME_INVALID) {
+        console_error("Frame allocator test: out of frames");
         return 0;
+    }
 
-    if (first == second)
+    if (first == second) {
+        console_error("Frame allocator test: two allocs returned the same frame");
         return 0;
+    }
 
     if ((first & (FRAME_SIZE - 1U)) != 0 ||
-        (second & (FRAME_SIZE - 1U)) != 0)
+        (second & (FRAME_SIZE - 1U)) != 0) {
+        console_error("Frame allocator test: misaligned frame returned");
         return 0;
+    }
 
     if (frame_is_free(first) ||
-        frame_is_free(second))
+        frame_is_free(second)) {
+        console_error("Frame allocator test: allocated frame still reports free");
         return 0;
+    }
 
-    if (frame_free(first) != 0)
+    if (frame_free(first) != 0) {
+        console_error("Frame allocator test: freeing the first frame failed");
         return 0;
+    }
 
-    if (frame_free(second) != 0)
+    if (frame_free(second) != 0) {
+        console_error("Frame allocator test: freeing the second frame failed");
         return 0;
+    }
 
-    if (frame_free_count() != before)
+    if (frame_free_count() != before) {
+        console_error("Frame allocator test: free count did not return to its starting value");
         return 0;
+    }
 
-    if (frame_free(0x12345U) == 0)
+    if (frame_free(0x12345U) == 0) {
+        console_error("Frame allocator test: misaligned free was accepted");
         return 0;
+    }
 
-    if (frame_free(0x00100000U) == 0)
+    /*
+     * The master page directory must never be allocatable or
+     * freeable: it is the table CR3 is actively translating through.
+     */
+    if (frame_is_free(PAGE_DIRECTORY_ADDRESS)) {
+        console_error("Frame allocator test: page directory is allocatable");
         return 0;
+    }
+
+    if (frame_free(PAGE_DIRECTORY_ADDRESS) == 0) {
+        console_error("Frame allocator test: freeing the page directory was accepted");
+        return 0;
+    }
+
+    if (frame_is_free(PAGE_TABLE_ADDRESS)) {
+        console_error("Frame allocator test: page table is allocatable");
+        return 0;
+    }
+
+    if (frame_free(PAGE_TABLE_ADDRESS) == 0) {
+        console_error("Frame allocator test: freeing the page table was accepted");
+        return 0;
+    }
 
     console_info(
         "Frame allocator test: PASS"

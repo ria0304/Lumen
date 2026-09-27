@@ -5,6 +5,8 @@
 #include "heap.h"
 #include "task.h"
 #include "fs.h"
+#include "ata.h"
+#include "rtc.h"
 #include "loader.h"
 
 
@@ -43,6 +45,78 @@ static const uint8_t privilege_fault_program[] = {
 static void shell_prompt(void)
 {
     terminal_write("Lumer> ");
+}
+
+/*
+ * Public so the line editor can redraw the prompt after a Ctrl-L
+ * clear or a Ctrl-C abandon, when it owns the screen and cannot let
+ * shell_handle_line() print one for it.
+ */
+void shell_print_prompt(void)
+{
+    shell_prompt();
+}
+
+static uint32_t shell_strlen(const char *s)
+{
+    uint32_t n = 0;
+
+    while (s[n] != '\0')
+        n++;
+
+    return n;
+}
+
+/* Render a directory, one entry per line, with a trailing slash on
+ * directories so the listing is unambiguous. */
+static void shell_list(const char *path)
+{
+    if (!fs_is_mounted()) {
+        console_error("No filesystem mounted (run 'format')");
+        return;
+    }
+
+    uint32_t count = 0;
+    int rc = fs_count_entries(path, FS_ROOT, &count);
+
+    if (rc != FS_OK) {
+        console_error("ls: ");
+        terminal_write(fs_strerror(rc));
+        terminal_putchar('\n');
+        return;
+    }
+
+    if (count == 0) {
+        console_info("(empty)");
+        return;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t ino = 0;
+        const char *name = 0;
+        uint8_t type = 0;
+
+        if (fs_list(path, FS_ROOT, i, &ino, &name, &type) != FS_OK)
+            break;
+
+        terminal_write(name);
+
+        if (type == FS_TYPE_DIR) {
+            terminal_putchar('/');
+        } else {
+            /* Show the size, which is the thing that actually
+             * distinguishes two files. */
+            terminal_write("  ");
+            fs_inode_t meta;
+
+            if (fs_stat_by_inode(ino, &meta) == FS_OK)
+                terminal_write_u32(meta.size);
+
+            terminal_write(" B");
+        }
+
+        terminal_putchar('\n');
+    }
 }
 
 static uint32_t shell_parse_uint(const char *text)
@@ -108,10 +182,10 @@ void shell_handle_line(const char *line)
         line[3] == 'p' &&
         line[4] == '\0') {
 
-        console_info("Commands: help, clear, echo, about, version, mem, uptime, task, taskkill, tasks, taskuser");
+        console_info("Commands: help, clear, echo, about, version, mem, uptime, task, taskkill, tasks, ps, taskuser, wait <pid>");
         console_info("Protection: vmtest, privtest");
-        console_info("Programs: install, run <file>");
-        console_info("Storage: format, ls, cat <file>, write <file> <text>, rm <file>, storage-test");
+        console_info("Programs: install, run <file>, exittest");
+        console_info("Storage: format, ls, cat <file>, write <file> <text>, rm <file>, storage-test, diskinfo, date");
     }
     else if (string_starts_with(line, "echo ")) {
         terminal_write(line + 5);
@@ -262,6 +336,32 @@ void shell_handle_line(const char *line)
             );
         }
     }
+    else if (line[0] == 'e' &&
+             line[1] == 'x' &&
+             line[2] == 'i' &&
+             line[3] == 't' &&
+             line[4] == 't' &&
+             line[5] == 'e' &&
+             line[6] == 's' &&
+             line[7] == 't' &&
+             line[8] == '\0') {
+
+        int id =
+            task_create_user_program(
+                ring3_exit_program,
+                ring3_exit_program_size
+            );
+
+        if (id >= 0) {
+            terminal_write(
+                "[INFO] Exit test task: ID "
+            );
+            shell_print_uint((uint32_t)id);
+            terminal_putchar('\n');
+        } else {
+            console_error("Exit test task creation failed");
+        }
+    }
     else if (line[0] == 'u' &&
              line[1] == 's' &&
              line[2] == 'e' &&
@@ -288,6 +388,47 @@ void shell_handle_line(const char *line)
             terminal_putchar('\n');
         } else {
             console_error("Task termination failed");
+        }
+    }
+    else if (line[0] == 'p' &&
+             line[1] == 's' &&
+             line[2] == '\0') {
+
+        terminal_write("PID PPID STATE RING\n");
+
+        for (uint32_t id = 0; id <= MAX_TASKS; id++) {
+            const task_t *task = task_get(id);
+
+            if (task == 0)
+                continue;
+
+            terminal_write(" ");
+            shell_print_uint(task->id);
+            terminal_write("   ");
+            shell_print_uint(task->parent_id);
+            terminal_write("   ");
+
+            if (task->state == TASK_RUNNING) {
+                terminal_write("RUNNING");
+            } else if (task->state == TASK_READY) {
+                terminal_write("READY");
+            } else if (task->state == TASK_BLOCKED) {
+                terminal_write("BLOCKED");
+            } else if (task->state == TASK_TERMINATED) {
+                terminal_write("TERMINATED");
+            } else {
+                terminal_write("UNUSED");
+            }
+
+            terminal_write(" ");
+
+            if (task->privilege == KERNEL_RING) {
+                terminal_write("0");
+            } else {
+                terminal_write("3");
+            }
+
+            terminal_putchar('\n');
         }
     }
     else if (line[0] == 't' &&
@@ -320,6 +461,54 @@ void shell_handle_line(const char *line)
             }
         }
     }
+    else if (string_starts_with(line, "wait ")) {
+        uint32_t id = shell_parse_uint(line + 5);
+
+        int result = task_wait(id);
+
+        if (result >= 0) {
+            terminal_write("[INFO] Collected child task ID ");
+            shell_print_uint((uint32_t)result);
+            terminal_putchar('\n');
+        } else {
+            console_error("Wait failed (not a terminated child)");
+        }
+    }
+    else if (string_starts_with(line, "diskinfo")) {
+        if (!ata_is_ready()) {
+            console_error("No ATA drive present");
+        } else {
+            terminal_write("[INFO] Model:  ");
+            terminal_write(ata_model()[0] ? ata_model() : "(unreported)");
+            terminal_putchar('\n');
+
+            terminal_write("[INFO] Serial: ");
+            terminal_write(ata_serial()[0] ? ata_serial() : "(unreported)");
+            terminal_putchar('\n');
+
+            terminal_write("[INFO] Capacity: ");
+            shell_print_uint((uint32_t)(ata_total_bytes() / 1024U / 1024U));
+            terminal_write(" MiB (");
+            shell_print_uint((uint32_t)ata_total_sectors());
+            terminal_write(" sectors, 512 B each)\n");
+
+            if (ata_requires_lba48()) {
+                console_warn("Drive needs LBA48; only the first 128 GiB are addressable");
+            }
+        }
+    }
+    else if (string_starts_with(line, "date")) {
+        rtc_time_t now;
+
+        if (rtc_read(&now) != 0) {
+            console_warn("Hardware clock unavailable; showing fallback date");
+        }
+
+        char stamp[32];
+        rtc_format(&now, stamp, sizeof(stamp));
+        terminal_write(stamp);
+        terminal_putchar('\n');
+    }
     else if (string_starts_with(line, "storage-test")) {
         if (!fs_is_mounted()) {
             console_error("Storage test requires a formatted filesystem");
@@ -334,16 +523,28 @@ void shell_handle_line(const char *line)
              line[4] == 'a' &&
              line[5] == 't' &&
              line[6] == '\0') {
-        if (fs_format() == 0) {
-            console_info("Disk formatted");
+        int rc = fs_format(0, 0);
+
+        if (rc == FS_OK) {
+            console_info("Disk formatted as LumenFS v2");
         } else {
-            console_error("Format failed (is a disk attached?)");
+            console_error("Format failed: ");
+            terminal_write(fs_strerror(rc));
+            terminal_putchar('\n');
         }
     }
     else if (line[0] == 'l' &&
              line[1] == 's' &&
              line[2] == '\0') {
-        fs_list();
+        shell_list("/");
+    }
+    else if (string_starts_with(line, "ls ")) {
+        const char *path = line + 3;
+
+        while (*path == ' ')
+            path++;
+
+        shell_list(*path == '\0' ? "/" : path);
     }
     else if (string_starts_with(line, "cat ")) {
         const char *filename = line + 4;
@@ -354,50 +555,160 @@ void shell_handle_line(const char *line)
         if (*filename == '\0') {
             console_error("Usage: cat <file>");
         } else {
-            char buffer[513];
-            int read = fs_read(filename, buffer, sizeof(buffer) - 1);
+            void *buffer = 0;
+            uint32_t size = 0;
+            int rc = fs_read(filename, FS_ROOT, &buffer, &size);
 
-            if (read < 0) {
-                console_error("No such file");
-            } else {
-                buffer[read] = '\0';
-                terminal_write(buffer);
+            if (rc != FS_OK) {
+                console_error("cat: ");
+                terminal_write(fs_strerror(rc));
                 terminal_putchar('\n');
+            } else {
+                if (size > 0) {
+                    terminal_write((const char *)buffer);
+
+                    if (((const char *)buffer)[size - 1] != '\n')
+                        terminal_putchar('\n');
+                }
+
+                kfree(buffer);
             }
         }
     }
     else if (string_starts_with(line, "write ")) {
         const char *rest = line + 6;
-        char filename[29];
-        int i = 0;
+        const char *space = 0;
 
-        while (rest[i] != ' ' && rest[i] != '\0' && i < 28) {
-            filename[i] = rest[i];
-            i++;
+        for (const char *p = rest; *p != '\0'; p++) {
+            if (*p == ' ') {
+                space = p;
+                break;
+            }
         }
-        filename[i] = '\0';
 
-        const char *text = (rest[i] == ' ') ? rest + i + 1 : rest + i;
-        int text_len = 0;
-
-        while (text[text_len] != '\0')
-            text_len++;
-
-        if (i == 0 || text_len == 0) {
+        if (space == 0 || space == rest || space[1] == '\0') {
             console_error("Usage: write <file> <text>");
-        } else if (fs_write(filename, text, (uint32_t)text_len) == 0) {
-            console_info("File written");
         } else {
-            console_error("Write failed (no disk, full, or too large)");
+            char filename[FS_NAME_MAX + 1];
+            uint32_t name_len = (uint32_t)(space - rest);
+            int rc;
+
+            if (name_len > FS_NAME_MAX) {
+                console_error("write: name too long");
+            } else {
+                for (uint32_t i = 0; i < name_len; i++)
+                    filename[i] = rest[i];
+
+                filename[name_len] = '\0';
+
+                rc = fs_write(filename, FS_ROOT, space + 1,
+                              shell_strlen(space + 1));
+
+                if (rc == FS_OK) {
+                    console_info("Wrote ");
+                    terminal_write(filename);
+                } else {
+                    console_error("Write failed: ");
+                    terminal_write(fs_strerror(rc));
+                    terminal_putchar('\n');
+                }
+            }
         }
     }
     else if (string_starts_with(line, "rm ")) {
         const char *filename = line + 3;
+        int rc = fs_delete(filename, FS_ROOT);
 
-        if (fs_delete(filename) == 0) {
+        if (rc == FS_OK) {
             console_info("File deleted");
         } else {
-            console_error("No such file");
+            console_error("rm: ");
+            terminal_write(fs_strerror(rc));
+            terminal_putchar('\n');
+        }
+    }
+    else if (string_starts_with(line, "mkdir ")) {
+        const char *path = line + 6;
+
+        while (*path == ' ')
+            path++;
+
+        int rc = fs_mkdir(path, FS_ROOT, FS_MODE_DIR_DEFAULT);
+
+        if (rc == FS_OK) {
+            console_info("Directory created");
+        } else {
+            console_error("mkdir: ");
+            terminal_write(fs_strerror(rc));
+            terminal_putchar('\n');
+        }
+    }
+    else if (string_starts_with(line, "rmdir ")) {
+        const char *path = line + 6;
+
+        while (*path == ' ')
+            path++;
+
+        int rc = fs_rmdir(path, FS_ROOT);
+
+        if (rc == FS_OK) {
+            console_info("Directory removed");
+        } else {
+            console_error("rmdir: ");
+            terminal_write(fs_strerror(rc));
+            terminal_putchar('\n');
+        }
+    }
+    else if (string_starts_with(line, "mv ")) {
+        const char *rest = line + 3;
+
+        while (*rest == ' ')
+            rest++;
+
+        const char *to = 0;
+
+        for (const char *p = rest; *p != '\0'; p++) {
+            if (*p == ' ') {
+                to = p + 1;
+                break;
+            }
+        }
+
+        if (to == 0) {
+            console_error("Usage: mv <from> <to>");
+        } else {
+            char from[FS_PATH_MAX];
+            uint32_t from_len = (uint32_t)(to - 1 - rest);
+
+            if (from_len >= FS_PATH_MAX) {
+                console_error("mv: path too long");
+            } else {
+                for (uint32_t i = 0; i < from_len; i++)
+                    from[i] = rest[i];
+
+                from[from_len] = '\0';
+
+                int rc = fs_rename(from, to, FS_ROOT);
+
+                if (rc == FS_OK) {
+                    console_info("Renamed");
+                } else {
+                    console_error("mv: ");
+                    terminal_write(fs_strerror(rc));
+                    terminal_putchar('\n');
+                }
+            }
+        }
+    }
+    else if (string_starts_with(line, "df")) {
+        if (!fs_is_mounted()) {
+            console_error("No filesystem mounted");
+        } else {
+            terminal_write("[INFO] Total: ");
+            terminal_write_u32((uint32_t)(fs_total_bytes() / 1024U));
+            terminal_write(" KiB, free: ");
+            terminal_write_u32((uint32_t)(fs_free_bytes() / 1024U));
+            terminal_write(" KiB\n");
         }
     }
     else if (line[0] == 'i' &&
@@ -411,9 +722,10 @@ void shell_handle_line(const char *line)
 
         if (fs_write(
                 "hello.bin",
+                FS_ROOT,
                 ring3_test_program,
                 ring3_test_program_size
-            ) == 0) {
+            ) == FS_OK) {
 
             console_info("Installed hello.bin");
         } else {

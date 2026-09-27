@@ -4,6 +4,16 @@ ORG 0x7C00
 CODE_SEG equ 0x08
 DATA_SEG equ 0x10
 
+BOOT_MAX_SECTORS equ 240
+
+%ifndef KERNEL_SECTORS
+    KERNEL_SECTORS equ 120
+%endif
+
+%if KERNEL_SECTORS > BOOT_MAX_SECTORS
+    %error "Kernel is larger than BOOT_MAX_SECTORS (240). Raise the limit or shrink the kernel."
+%endif
+
 start:
     cli
 
@@ -18,31 +28,69 @@ start:
     mov si, loading_msg
     call print
 
-    ; Load kernel at physical 0x10000
-    mov ax, 0x1000
-    mov es, ax
-    xor bx, bx
+    mov word [dest_seg], 0x1000
+    mov word [dest_off], 0x0000
+    mov word [lba], 1
+    mov word [remaining], KERNEL_SECTORS
 
-    ; Sector count is not derived from the build -- bump this (and
-    ; re-check it) any time kernel/build/kernel.bin grows close to
-    ; count * 512 bytes. 120 sectors = 60 KiB, comfortably above the
-    ; current ~36 KiB kernel with headroom for near-term growth.
+    mov ah, 0
+    mov dl, 0
+    int 0x13
+
+.load_loop:
+    xor ax, ax
+    mov ds, ax
+
+    mov ax, [lba]
+    xor dx, dx
+    mov bx, 36
+    div bx
+    mov [cylinder], ax
+    mov ax, dx
+    xor dx, dx
+    mov bx, 18
+    div bx
+    mov [head], al
+    inc dl
+    mov [sect], dl
+
     mov ah, 0x02
-    mov al, 120
-    mov ch, 0x00
-    mov cl, 0x02
-    mov dh, 0x00
-    mov dl, [boot_drive]
-
+    mov al, 1
+    mov ch, [cylinder]
+    mov cl, [sect]
+    mov al, [cylinder]
+    shr al, 6
+    shl al, 6
+    or cl, al
+    mov dh, [head]
+    mov dl, 0
+    mov es, [dest_seg]
+    mov bx, [dest_off]
+    int 0x13
+    jnc .read_ok
+    mov dl, 1
     int 0x13
     jc disk_error
 
+.read_ok:
+
+    mov ax, [dest_off]
+    add ax, 512
+    jnc .no_seg_carry
+    add word [dest_seg], 0x1000
+.no_seg_carry:
+    mov [dest_off], ax
+
+    inc word [lba]
+    dec word [remaining]
+    jnz .load_loop
+
+.load_done:
     xor ax, ax
     mov ds, ax
     mov si, read_ok_msg
     call print
 
-    ; Enable A20
     in al, 0x92
     or al, 00000010b
     out 0x92, al
@@ -50,30 +98,56 @@ start:
     mov si, a20_ok_msg
     call print
 
-    ; Load GDT
     cli
     lgdt [gdt_descriptor]
 
     mov si, gdt_ok_msg
     call print
 
-    ; Show that we are immediately before protected mode
     mov si, pm_msg
     call print
 
-    ; Enable protected mode
     mov eax, cr0
     or eax, 0x00000001
     mov cr0, eax
 
-    ; Far jump into protected mode
-    jmp dword CODE_SEG:protected_mode
+    jmp dword CODE_SEG:protected_mode_entry
 
 
 disk_error:
+    mov al, ah
+    call print_hex8
+    mov al, 0x0D
+    call print_char
+    mov al, 0x0A
+    call print_char
     mov si, disk_error_msg
     call print
     jmp halt
+
+
+print_char:
+    mov ah, 0x0E
+    int 0x10
+    ret
+
+
+print_hex8:
+    push ax
+    shr al, 4
+    call .nib
+    pop ax
+    and al, 0x0F
+    call .nib
+    ret
+.nib:
+    cmp al, 9
+    jbe .d
+    add al, 7
+.d:
+    add al, '0'
+    call print_char
+    ret
 
 
 print:
@@ -99,9 +173,8 @@ halt:
 
 BITS 32
 
-protected_mode:
+protected_mode_entry:
 
-    ; Load data segment FIRST
     mov ax, DATA_SEG
     mov ds, ax
     mov es, ax
@@ -111,12 +184,10 @@ protected_mode:
 
     mov esp, 0x90000
 
-    ; PROTECTED MODE TEST
     mov word [0xB8000], 0x0741
     mov word [0xB8002], 0x0742
     mov word [0xB8004], 0x0743
 
-    ; Jump to kernel
     mov eax, 0x10000
     jmp dword CODE_SEG:0x10000
 
@@ -124,13 +195,20 @@ protected_mode:
 BITS 16
 
 boot_drive db 0
+cylinder   dw 0
+head       db 0
+sect       db 0
+dest_seg   dw 0x0000
+dest_off   dw 0x0000
+lba        dw 0x0000
+remaining  dw 0x0000
 
-loading_msg    db "Loading kernel...", 0
-read_ok_msg    db " READ_OK", 0
-a20_ok_msg     db " A20_OK", 0
-gdt_ok_msg     db " GDT_OK", 0
-pm_msg         db " PM_START", 0
-disk_error_msg db " DISK_ERROR", 0
+loading_msg    db "L", 0
+read_ok_msg    db "O", 0
+a20_ok_msg     db "A", 0
+gdt_ok_msg     db "G", 0
+pm_msg         db "P", 0
+disk_error_msg db "E", 0
 
 
 gdt_start:
@@ -176,6 +254,5 @@ gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dd gdt_start
 
-
-times 510-($-$$) db 0
+times 510 - ($ - $$) db 0
 dw 0xAA55

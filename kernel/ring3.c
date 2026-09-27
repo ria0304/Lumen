@@ -24,6 +24,25 @@ const uint8_t ring3_test_program[] = {
 const uint32_t ring3_test_program_size =
     sizeof(ring3_test_program);
 
+/*
+ * Ring 3 process-lifecycle test:
+ *
+ *     mov eax, 3
+ *     int 0x80
+ *     jmp $
+ *
+ * SYS_EXIT=3. The task should terminate and disappear from the
+ * runnable scheduler set.
+ */
+const uint8_t ring3_exit_program[] = {
+    0xB8, 0x03, 0x00, 0x00, 0x00,
+    0xCD, 0x80,
+    0xEB, 0xFE
+};
+
+const uint32_t ring3_exit_program_size =
+    sizeof(ring3_exit_program);
+
 extern void enter_user_mode(void);
 
 static int ring3_ready = 0;

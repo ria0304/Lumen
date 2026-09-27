@@ -1,0 +1,11 @@
+build/
+build-test/
+*.img
+*.bin
+*.elf
+*.o
+.ring3_backup_*/
+
+# Host-side tools built for the development host, not the target.
+tools/mkfs
+tools/*.o

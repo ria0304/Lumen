@@ -16,8 +16,26 @@
 #define PAGE_DIRTY          0x040U
 #define PAGE_GLOBAL         0x100U
 
-#define PAGE_DIRECTORY_ADDRESS 0x00220000U
-#define PAGE_TABLE_ADDRESS     0x00221000U
+/*
+ * The master page directory and the single kernel page table.
+ *
+ * These must satisfy three constraints simultaneously:
+ *
+ *   1. Below PAGING_IDENTITY_LIMIT (4 MiB), because paging_init()
+ *      identity-maps only the first 4 MiB and the CPU reads CR3
+ *      through that map.
+ *   2. Outside the kernel image, so the directory cannot be aliased
+ *      by a static. It used to live at 0x00220000, which is inside
+ *      .bss's address range -- harmless only because the arrays
+ *      currently placed there stop short of it. linker.ld now
+ *      asserts the kernel's .bss can never grow into 0x00100000.
+ *   3. Inside a range the frame allocator already refuses to hand
+ *      out or accept frees for, so no frame_alloc() can alias CR3's
+ *      backing store. The 0x00100000-0x00200000 reservation in
+ *      frame.c covers this.
+ */
+#define PAGE_DIRECTORY_ADDRESS 0x00100000U
+#define PAGE_TABLE_ADDRESS     0x00101000U
 
 #define PAGE_DIRECTORY_COUNT   1024U
 #define PAGE_TABLE_SPAN        0x00400000U

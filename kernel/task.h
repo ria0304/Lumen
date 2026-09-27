@@ -30,6 +30,7 @@ typedef struct {
 
 typedef struct {
     uint32_t id;
+    uint32_t parent_id;
     task_state_t state;
     uint32_t privilege;
 
@@ -69,6 +70,7 @@ int task_block(uint32_t id);
 int task_wake(uint32_t id);
 int task_yield(void);
 int task_exit(void);
+int task_wait(uint32_t child_id);
 
 const task_t *task_get(uint32_t id);
 uint32_t task_count(void);

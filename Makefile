@@ -7,28 +7,33 @@ CFLAGS = -m32 -ffreestanding -fno-pie -fno-stack-protector -nostdlib \
 LDFLAGS = -m elf_i386 -T linker.ld -nostdlib
 
 BUILD = build
+BUILD_TEST = build-test
 
 BOOT_ASM = boot/boot.asm
 
+# All kernel headers, so that editing any of them rebuilds every
+# object that includes it. Without this the build links against stale
+# objects and silently succeeds against an interface that no longer
+# matches -- which is exactly what happened when the filesystem API
+# changed shape.
+KERNEL_HDRS = $(wildcard kernel/*.h)
+
 KERNEL_OBJS = $(BUILD)/entry.o $(BUILD)/usermode.o $(BUILD)/isr.o $(BUILD)/gdt_flush.o $(BUILD)/gdt.o $(BUILD)/tss_load.o $(BUILD)/tss.o \
-              $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/idt.o $(BUILD)/pic.o $(BUILD)/pit.o $(BUILD)/keyboard.o $(BUILD)/heap.o \
+              $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/serial.o $(BUILD)/idt.o $(BUILD)/pic.o $(BUILD)/pit.o $(BUILD)/keyboard.o $(BUILD)/heap.o \
               $(BUILD)/line_editor.o $(BUILD)/shell.o $(BUILD)/task.o $(BUILD)/scheduler.o $(BUILD)/task_demo.o $(BUILD)/paging.o $(BUILD)/frame.o $(BUILD)/ring3.o $(BUILD)/syscall.o \
-              $(BUILD)/ata.o $(BUILD)/fs.o $(BUILD)/loader.o
+              $(BUILD)/ata.o $(BUILD)/rtc.o $(BUILD)/kmem.o $(BUILD)/fs.o $(BUILD)/loader.o
 
 KERNEL_ELF = $(BUILD)/kernel.elf
 KERNEL_BIN = $(BUILD)/kernel.bin
 IMG = $(BUILD)/lumer.img
 DISK = $(BUILD)/disk.img
 
-.PHONY: all clean run
+.PHONY: all clean run test disk-reset
 
 all: $(IMG) $(DISK)
 
 $(BUILD):
 	mkdir -p $(BUILD)
-
-$(BUILD)/boot.bin: $(BOOT_ASM) | $(BUILD)
-	$(ASM) -f bin $< -o $@
 
 $(BUILD)/usermode.o: kernel/usermode.asm | $(BUILD)
 	$(ASM) -f elf32 $< -o $@
@@ -45,10 +50,7 @@ $(BUILD)/tss_load.o: kernel/tss_load.asm | $(BUILD)
 $(BUILD)/isr.o: kernel/isr.asm | $(BUILD)
 	$(ASM) -f elf32 $< -o $@
 
-$(BUILD)/ring3.o: kernel/ring3.c | $(BUILD)
-	$(CC) $(CFLAGS) $< -o $@
-
-$(BUILD)/%.o: kernel/%.c | $(BUILD)
+$(BUILD)/%.o: kernel/%.c $(KERNEL_HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@
 
 $(KERNEL_ELF): $(KERNEL_OBJS) linker.ld
@@ -56,6 +58,25 @@ $(KERNEL_ELF): $(KERNEL_OBJS) linker.ld
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	objcopy -O binary $< $@
+
+# The boot sector's sector count is derived from the real kernel size
+# instead of being hand-maintained. KERNEL_SECTORS is a recursive
+# variable, so $(shell ...) runs when the recipe below is expanded --
+# which is after KERNEL_BIN has been built, as a prerequisite of this
+# target. The extra sector is slack, and the check under the recipe
+# turns a would-be silent truncation into a loud build failure.
+KERNEL_SECTORS = $(shell echo $$(( ($$(stat -c%s $(KERNEL_BIN) 2>/dev/null || echo 0) + 511) / 512 + 1 )))
+
+$(BUILD)/boot.bin: $(BOOT_ASM) $(KERNEL_BIN) | $(BUILD)
+	@cap=$$(( $(KERNEL_SECTORS) * 512 )); \
+	 size=$$(stat -c%s $(KERNEL_BIN)); \
+	 if [ $$size -gt $$cap ]; then \
+	   echo "ERROR: kernel ($$size bytes) exceeds boot sector capacity ($$cap bytes)."; \
+	   echo "       Bump BOOT_MAX_SECTORS in boot/boot.asm or shrink the kernel."; \
+	   exit 1; \
+	 fi; \
+	 echo "  BOOT    kernel $$size bytes -> $(KERNEL_SECTORS) sectors ($$cap byte capacity)"
+	$(ASM) -f bin -DKERNEL_SECTORS=$(KERNEL_SECTORS) $< -o $@
 
 $(IMG): $(BUILD)/boot.bin $(KERNEL_BIN)
 	cat $(BUILD)/boot.bin $(KERNEL_BIN) > $@
@@ -75,8 +96,53 @@ disk-reset:
 	rm -f $(DISK)
 	$(MAKE) $(DISK)
 
-clean:
-	rm -rf $(BUILD)
+# ---------------------------------------------------------------------------
+# make test
+#
+# Builds a separate copy of the kernel with -DLUMEN_AUTOEXIT and runs it
+# headless, mirroring the whole boot log over COM1. The kernel exits QEMU
+# on its own once the boot self-tests are done, so this is fast and needs
+# no timeout. A fresh disk is used every time so results don't depend on
+# whatever the last interactive session left behind.
+# ---------------------------------------------------------------------------
+# The sub-make runs with BUILD=$(BUILD_TEST), so its $(DISK) target --
+# $(BUILD)/disk.img -- is exactly this path. No separate rule is
+# needed; declaring one would just collide with it.
+TEST_DISK = $(BUILD_TEST)/disk.img
+TEST_LOG = $(BUILD_TEST)/boot.log
+.PHONY: test
+test:
+	@rm -f $(TEST_DISK)
+	@$(MAKE) --no-print-directory BUILD=$(BUILD_TEST) \
+	   CFLAGS="$(CFLAGS) -DLUMEN_AUTOEXIT" \
+	   $(BUILD_TEST)/lumer.img $(TEST_DISK)
+	@echo "  TEST    booting headless, capturing serial output..."
+	@timeout 60 qemu-system-i386 -display none -serial stdio \
+	    -boot order=a \
+	    -drive file=$(BUILD_TEST)/lumer.img,format=raw,if=floppy \
+	    -drive file=$(TEST_DISK),format=raw,if=ide \
+	    -device isa-debug-exit \
+	    < /dev/null > $(TEST_LOG) 2>&1; true
+	@grep -E 'SELFTEST' $(TEST_LOG) || true
+	@echo ""
+	@if grep -q 'SELFTEST-SUMMARY pass=' $(TEST_LOG) && \
+	    ! grep -qE 'SELFTEST [A-Z]+ FAIL' $(TEST_LOG); then \
+	   echo "  TEST    PASS -- $$(grep -o 'pass=[0-9]*' $(TEST_LOG)) failures=0"; \
+	 else \
+	   echo "  TEST    FAIL -- see $(TEST_LOG)"; exit 1; \
+	 fi
 
+clean:
+	rm -rf $(BUILD) $(BUILD_TEST)
+
+# Interactive boot. The floppy carries the boot sector plus kernel;
+# the IDE disk carries LumenFS data and is deliberately the same
+# persistent file across runs, so files survive a reboot.
 run: $(IMG) $(DISK)
-	qemu-system-i386 -fda $(IMG) -hda $(DISK)
+	@echo "  RUN     Lumer (Ctrl-A X in QEMU to quit)"
+	qemu-system-i386 -display curses \
+	    -boot order=a \
+	    -drive file=$(IMG),format=raw,if=floppy \
+	    -drive file=$(DISK),format=raw,if=ide \
+	    -serial stdio \
+	    $(QEMUFLAGS)

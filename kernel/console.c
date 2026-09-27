@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "console.h"
+#include "serial.h"
 
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
@@ -79,6 +80,8 @@ void terminal_clear(void)
 
 void terminal_putchar(char c)
 {
+    serial_putchar(c);
+
     if (c == '\n') {
         terminal_newline();
         return;
@@ -117,6 +120,33 @@ void terminal_write(const char *message)
 {
     for (int i = 0; message[i] != '\0'; i++)
         terminal_putchar(message[i]);
+}
+
+void terminal_write_u32(uint32_t value)
+{
+    char digits[10];
+    int count = 0;
+
+    if (value == 0) {
+        terminal_putchar('0');
+        return;
+    }
+
+    while (value > 0) {
+        digits[count++] = (char)('0' + (value % 10));
+        value /= 10;
+    }
+
+    while (count > 0)
+        terminal_putchar(digits[--count]);
+}
+
+void terminal_write_hex8(uint8_t value)
+{
+    const char hex[] = "0123456789ABCDEF";
+
+    terminal_putchar(hex[(value >> 4) & 0xF]);
+    terminal_putchar(hex[value & 0xF]);
 }
 
 void console_info(const char *message)

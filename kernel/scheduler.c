@@ -224,6 +224,58 @@ uint32_t scheduler_irq(uint32_t *frame)
     return selected->switch_esp;
 }
 
+
+/*
+ * Immediately switch away from a task that has executed SYS_EXIT.
+ *
+ * The exiting task must never return through its own syscall iret
+ * frame. Its address space is kept alive until its parent reaps it
+ * with task_wait().
+ */
+uint32_t scheduler_exit_current(uint32_t *frame)
+{
+    uint32_t current_id = current_task_id;
+    task_t *current = (task_t *)task_get(current_id);
+
+    /*
+     * Keep the frame associated with the task for bookkeeping, but
+     * this frame must NOT be returned to iret for a terminated task.
+     */
+    if (current != 0 && frame != 0)
+        current->switch_esp = (uint32_t)frame;
+
+    /*
+     * Find the next runnable task.
+     */
+    uint32_t next_id = scheduler_next_task();
+
+    /*
+     * Never return the terminated task itself.
+     */
+    if (next_id == current_id || next_id > MAX_TASKS)
+        next_id = 0;
+
+    task_t *next = (task_t *)task_get(next_id);
+
+    /*
+     * Task 0 is the ultimate fallback. If it has no saved frame,
+     * preserve the old frame rather than dereferencing NULL.
+     */
+    if (next == 0 ||
+        next->state == TASK_UNUSED ||
+        next->state == TASK_TERMINATED ||
+        next->switch_esp == 0) {
+        return (uint32_t)frame;
+    }
+
+    next->state = TASK_RUNNING;
+    current_task_id = next_id;
+
+    scheduler_activate(next);
+
+    return next->switch_esp;
+}
+
 int scheduler_run_self_test(void)
 {
     uint32_t saved_current = current_task_id;

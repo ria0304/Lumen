@@ -61,6 +61,7 @@ extern kbd_handler
 extern irq_unhandled_handler
 extern syscall_handler
 extern scheduler_irq
+extern scheduler_exit_current
 
 idt_load:
     mov eax, [esp + 4]
@@ -246,12 +247,42 @@ IRQ_DEFAULT 15
 isr_syscall:
     pusha
 
-; Pass the PUSHA frame to the C syscall dispatcher.
-; The dispatcher may modify saved registers, including EAX.
+    ; PUSHA stack layout:
+    ; [esp+00] EDI
+    ; [esp+04] ESI
+    ; [esp+08] EBP
+    ; [esp+12] original ESP
+    ; [esp+16] EBX
+    ; [esp+20] EDX
+    ; [esp+24] ECX
+    ; [esp+28] EAX
+
     mov eax, esp
     push eax
     call syscall_handler
     add esp, 4
 
+    ; Check saved EAX for SYS_EXIT.
+    ; SYS_EXIT = 3.
+    cmp dword [esp + 28], 3
+    jne .normal_syscall_return
+
+    ; The current task has been marked TERMINATED.
+    ;
+    ; Do NOT pop this task's frame and iret.
+    ; Instead select another runnable task.
+
+    mov eax, esp
+    push eax
+    call scheduler_exit_current
+    add esp, 4
+
+    ; EAX contains the next task's saved interrupt frame.
+    mov esp, eax
     popa
     iret
+
+.normal_syscall_return:
+    popa
+    iret
+

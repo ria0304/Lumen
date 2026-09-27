@@ -2,6 +2,7 @@
 #include "gdt.h"
 #include "privilege.h"
 #include "tss.h"
+#include "console.h"
 
 extern tss_t kernel_tss;
 
@@ -89,37 +90,104 @@ void gdt_init(void)
 
 int gdt_run_self_test(void)
 {
-    if (gp.limit != sizeof(gdt) - 1)
-        return 0;
+    /*
+     * Access-byte comparisons mask off the bits the CPU owns, since
+     * they change in the table behind the CPU's back:
+     *
+     *   - Code/data segments get the Accessed flag (bit 0) set the
+     *     first time a segment register is loaded with that
+     *     selector, so the kernel data descriptor reads back as
+     *     0x93 rather than the 0x92 written at init.
+     *   - A 32-bit TSS descriptor changes type from 9 (available) to
+     *     11 (busy) when 'ltr' loads it, i.e. bit 1 gets set, so it
+     *     reads back as 0x8B rather than 0x89. Bit 0 is part of
+     *     that type encoding already, not an accessed flag.
+     *
+     * Comparing the raw bytes made this self-test report failures
+     * for a GDT that was in fact correct.
+     */
+    #define GDT_ACCESS_MASK 0xFE
+    #define GDT_TSS_BUSY_MASK 0xFD
 
-    if (gp.base != (uint32_t)&gdt)
+    /*
+     * Each check reports which expectation broke rather than just
+     * returning 0, so a failure here is diagnosable from the serial
+     * log instead of being an anonymous "GDT self-test: FAILED".
+     */
+    if (gp.limit != sizeof(gdt) - 1) {
+        console_error("GDT self-test: gp.limit wrong");
         return 0;
+    }
 
-    if (gdt[0].access != 0)
+    if (gp.base != (uint32_t)&gdt) {
+        console_error("GDT self-test: gp.base wrong");
         return 0;
+    }
 
-    if (gdt[1].access != 0x9A)
+    if (gdt[0].access != 0) {
+        console_error("GDT self-test: null descriptor not empty");
         return 0;
+    }
 
-    if (gdt[2].access != 0x92)
+    if ((gdt[1].access & GDT_ACCESS_MASK) != 0x9A) {
+        console_error("GDT self-test: kernel code access byte wrong");
         return 0;
+    }
 
-    if (gdt[3].access != 0xFA)
+    if ((gdt[2].access & GDT_ACCESS_MASK) != 0x92) {
+        console_error("GDT self-test: kernel data access byte wrong");
         return 0;
+    }
 
-    if (gdt[4].access != 0xF2)
+    if ((gdt[3].access & GDT_ACCESS_MASK) != 0xFA) {
+        console_error("GDT self-test: user code access byte wrong");
         return 0;
+    }
 
-    if (gdt[5].access != 0x89)
+    if ((gdt[4].access & GDT_ACCESS_MASK) != 0xF2) {
+        console_error("GDT self-test: user data access byte wrong");
         return 0;
+    }
+
+    if ((gdt[5].access & GDT_TSS_BUSY_MASK) != 0x89) {
+        console_error("GDT self-test: TSS access byte = 0x");
+        terminal_write_hex8(gdt[5].access);
+        return 0;
+    }
 
     uint32_t tss_base =
         ((uint32_t)gdt[5].base_high << 24) |
         ((uint32_t)gdt[5].base_middle << 16) |
         gdt[5].base_low;
 
-    if (tss_base != (uint32_t)&kernel_tss)
+    if (tss_base != (uint32_t)&kernel_tss) {
+        console_error("GDT self-test: TSS base wrong");
         return 0;
+    }
+
+    /*
+     * A Ring 3 task is only reachable if the user descriptors are
+     * actually loaded into the CPU, so confirm the reload took by
+     * reading back the live segment registers.
+     */
+    uint32_t cs = 0;
+    uint32_t ds = 0;
+
+    __asm__ volatile (
+        "mov %%cs, %0\n"
+        "mov %%ds, %1\n"
+        : "=r"(cs), "=r"(ds)
+    );
+
+    if ((cs & 0xFFFF) != KERNEL_CODE_SELECTOR) {
+        console_error("GDT self-test: live CS is not the kernel code selector");
+        return 0;
+    }
+
+    if ((ds & 0xFFFF) != KERNEL_DATA_SELECTOR) {
+        console_error("GDT self-test: live DS is not the kernel data selector");
+        return 0;
+    }
 
     return 1;
 }
