@@ -96,6 +96,106 @@ void syscall_handler(uint32_t *frame)
             break;
         }
 
+        case SYS_GETPPID:
+        {
+            uint32_t id = scheduler_current_task();
+            const task_t *task = task_get(id);
+            if (task != 0)
+                frame[7] = task->parent_id;
+            else
+                frame[7] = 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_GETUID:
+        case SYS_GETGID:
+        {
+            uint32_t id = scheduler_current_task();
+            const task_t *task = task_get(id);
+            if (task != 0 && task->privilege == USER_RING)
+                frame[7] = 0;  /* root for now */
+            else
+                frame[7] = 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_SETSID:
+        {
+            uint32_t id = scheduler_current_task();
+            task_t *task = (task_t *)task_get(id);
+            if (task != 0) {
+                task->parent_id = 0;  /* session leader */
+                frame[7] = id;
+            } else {
+                frame[7] = 0xFFFFFFFFU;
+            }
+            break;
+        }
+
+        case SYS_GETPGID:
+        {
+            uint32_t id = scheduler_current_task();
+            const task_t *task = task_get(id);
+            if (task != 0)
+                frame[7] = id;  /* process group = pid for now */
+            else
+                frame[7] = 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_FORK:
+        {
+            int child = task_fork();
+            frame[7] = (child >= 0) ? (uint32_t)child : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_EXEC:
+        {
+            /*
+             * EBX = filename pointer
+             */
+            const char *filename = (const char *)frame[4];
+            frame[7] = sys_exec(filename) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_KILL:
+        {
+            /*
+             * EBX = pid
+             * ECX = signal
+             */
+            uint32_t target_pid = frame[4];
+            uint32_t sig = frame[5];
+            frame[7] = sys_kill(target_pid, sig) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_SIGNAL:
+        {
+            /*
+             * EBX = signal
+             * ECX = handler
+             */
+            uint32_t sig = frame[4];
+            void (*handler)(int) = (void (*)(int))frame[5];
+            frame[7] = sys_signal(sig, handler) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_SIGPROCMASK:
+        {
+            /*
+             * EBX = how
+             * ECX = mask
+             */
+            uint32_t how = frame[4];
+            uint32_t mask = frame[5];
+            frame[7] = sys_sigprocmask(how, mask);
+            break;
+        }
+
         default:
             frame[7] = 0xFFFFFFFFU;
             console_error(

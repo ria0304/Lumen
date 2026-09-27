@@ -3,9 +3,15 @@
 
 #include <stdint.h>
 #include "privilege.h"
+#include "fs.h"
 
 #define MAX_TASKS 16
 #define TASK_STACK_SIZE 4096
+#define MAX_FDS 16
+
+#define SIGKILL  9
+#define SIGTERM 15
+#define SIGCHLD 17
 
 typedef enum {
     TASK_UNUSED = 0,
@@ -29,6 +35,17 @@ typedef struct {
 } task_context_t;
 
 typedef struct {
+    fs_handle_t handles[MAX_FDS];
+    int open[MAX_FDS];
+} fd_table_t;
+
+typedef struct {
+    uint32_t pending;
+    uint32_t mask;
+    void (*handlers[32])(int);
+} signal_t;
+
+typedef struct {
     uint32_t id;
     uint32_t parent_id;
     task_state_t state;
@@ -48,6 +65,10 @@ typedef struct {
     uint32_t switch_esp;
 
     task_context_t context;
+
+    fd_table_t fd_table;
+    uint32_t cwd_inode;
+    signal_t signals;
 } task_t;
 
 void task_init(void);
@@ -64,6 +85,13 @@ int task_create_with_privilege(uint32_t privilege);
  * code_size exceeds a page or allocation fails.
  */
 int task_create_user_program(const uint8_t *code, uint32_t code_size);
+
+int task_fork(void);
+int sys_exec(const char *filename);
+
+int sys_kill(uint32_t pid, int sig);
+int sys_signal(int sig, void (*handler)(int));
+int sys_sigprocmask(int how, uint32_t mask);
 
 int task_terminate(uint32_t id);
 int task_block(uint32_t id);

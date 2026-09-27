@@ -4,6 +4,10 @@
 #include "frame.h"
 #include "paging.h"
 #include "ring3.h"
+#include "fs.h"
+#include "kmem.h"
+#include "privilege.h"
+#include "heap.h"
 
 extern uint32_t scheduler_current_task(void);
 
@@ -139,6 +143,17 @@ void task_init(void)
         tasks[i].context.esp = 0;
         tasks[i].context.eip = 0;
         tasks[i].context.eflags = 0x202;
+
+        for (int j = 0; j < MAX_FDS; j++) {
+            tasks[i].fd_table.open[j] = 0;
+        }
+        tasks[i].cwd_inode = 0;  /* root directory inode */
+
+        tasks[i].signals.pending = 0;
+        tasks[i].signals.mask = 0;
+        for (int s = 0; s < 32; s++) {
+            tasks[i].signals.handlers[s] = 0;
+        }
     }
 
     /*
@@ -292,6 +307,17 @@ static int task_create_ring3_with_code(
 
     tasks[i].page_directory = directory;
 
+    for (int j = 0; j < MAX_FDS; j++) {
+        tasks[i].fd_table.open[j] = 0;
+    }
+    tasks[i].cwd_inode = tasks[0].cwd_inode;
+
+    tasks[i].signals.pending = 0;
+    tasks[i].signals.mask = 0;
+    for (int s = 0; s < 32; s++) {
+        tasks[i].signals.handlers[s] = 0;
+    }
+
     tasks[i].switch_esp =
         task_prepare_user_stack(
             tasks[i].stack_base,
@@ -305,11 +331,6 @@ static int task_create_ring3_with_code(
     active_tasks++;
 
     return (int)i;
-}
-
-int task_create_user_program(const uint8_t *code, uint32_t code_size)
-{
-    return task_create_ring3_with_code(code, code_size);
 }
 
 int task_create_with_privilege(uint32_t privilege)
@@ -354,6 +375,12 @@ int task_create_with_privilege(uint32_t privilege)
         tasks[i].context.eflags = 0x202;
 
         if (privilege == KERNEL_RING) {
+
+            tasks[i].signals.pending = 0;
+            tasks[i].signals.mask = 0;
+            for (int s = 0; s < 32; s++) {
+                tasks[i].signals.handlers[s] = 0;
+            }
 
             tasks[i].switch_esp =
                 task_prepare_stack(
@@ -471,6 +498,11 @@ int task_create_with_privilege(uint32_t privilege)
 
             tasks[i].page_directory = directory;
 
+            for (int j = 0; j < MAX_FDS; j++) {
+                tasks[i].fd_table.open[j] = 0;
+            }
+            tasks[i].cwd_inode = tasks[0].cwd_inode;
+
             tasks[i].switch_esp =
                 task_prepare_user_stack(
                     tasks[i].stack_base,
@@ -493,6 +525,176 @@ int task_create_with_privilege(uint32_t privilege)
 int task_create(void)
 {
     return task_create_with_privilege(KERNEL_RING);
+}
+
+int task_create_user_program(const uint8_t *code, uint32_t code_size)
+{
+    return task_create_ring3_with_code(code, code_size);
+}
+
+int task_fork(void)
+{
+    uint32_t parent_id = scheduler_current_task();
+    const task_t *parent = task_get(parent_id);
+    if (parent == 0)
+        return -1;
+
+    if (parent->privilege == USER_RING) {
+        return -1;
+    }
+
+    int child_id = task_create();
+    if (child_id < 0)
+        return -1;
+
+    task_t *child = (task_t *)task_get(child_id);
+    if (child == 0) {
+        task_terminate(child_id);
+        return -1;
+    }
+
+    child->parent_id = parent_id;
+    child->context.eax = 0;
+    child->context.ebx = parent->context.ebx;
+    child->context.ecx = parent->context.ecx;
+    child->context.edx = parent->context.edx;
+    child->context.esi = parent->context.esi;
+    child->context.edi = parent->context.edi;
+    child->context.ebp = parent->context.ebp;
+    child->context.esp = parent->context.esp;
+    child->context.eip = parent->context.eip;
+    child->context.eflags = parent->context.eflags;
+
+    for (int j = 0; j < MAX_FDS; j++) {
+        child->fd_table.open[j] = parent->fd_table.open[j];
+        if (parent->fd_table.open[j]) {
+            child->fd_table.handles[j] = parent->fd_table.handles[j];
+        }
+    }
+    child->cwd_inode = parent->cwd_inode;
+
+    child->signals.pending = parent->signals.pending;
+    child->signals.mask = parent->signals.mask;
+    for (int s = 0; s < 32; s++) {
+        child->signals.handlers[s] = parent->signals.handlers[s];
+    }
+
+    return child_id;
+}
+
+int sys_exec(const char *filename)
+{
+    if (filename == 0)
+        return 0;
+
+    uint32_t id = scheduler_current_task();
+    task_t *task = (task_t *)task_get(id);
+    if (task == 0)
+        return 0;
+
+    if (task->privilege != USER_RING)
+        return 0;
+
+    fs_handle_t *fd = kmalloc(sizeof(fs_handle_t));
+    if (fd == 0)
+        return 0;
+
+    if (fs_open(filename, FS_ROOT, 0, fd) != 0) {
+        kfree(fd);
+        return 0;
+    }
+
+    uint32_t file_size = 0;
+    if (fs_handle_size(fd, &file_size) != 0 || file_size > PAGE_SIZE) {
+        fs_close(fd);
+        kfree(fd);
+        return 0;
+    }
+
+    uint8_t *code = kmalloc(file_size);
+    if (code == 0) {
+        fs_close(fd);
+        kfree(fd);
+        return 0;
+    }
+
+    uint32_t read = 0;
+    if (fs_handle_read(fd, code, file_size, &read) != 0 || read != file_size) {
+        kfree(code);
+        fs_close(fd);
+        kfree(fd);
+        return 0;
+    }
+    fs_close(fd);
+    kfree(fd);
+
+    if (task->page_directory != PAGE_DIRECTORY_ADDRESS) {
+        __asm__ volatile ("cli");
+        if (paging_current_directory() == task->page_directory)
+            paging_switch_directory(PAGE_DIRECTORY_ADDRESS);
+        paging_destroy_address_space(task->page_directory);
+        __asm__ volatile ("sti");
+    }
+
+    uint32_t directory = paging_create_address_space();
+    if (directory == FRAME_INVALID) {
+        return 0;
+    }
+
+    uint32_t code_phys = frame_alloc();
+    if (code_phys == FRAME_INVALID || code_phys >= PAGING_IDENTITY_LIMIT) {
+        if (code_phys != FRAME_INVALID)
+            frame_free(code_phys);
+        frame_free(directory);
+        return 0;
+    }
+
+    uint8_t *code_dst = (uint8_t *)code_phys;
+    for (uint32_t k = 0; k < PAGE_SIZE; k++)
+        code_dst[k] = (k < file_size) ? code[k] : 0;
+
+    if (paging_map_in_directory(directory, TASK_RING3_CODE_VA, code_phys,
+            PAGE_PRESENT | PAGE_USER) != 0) {
+        frame_free(code_phys);
+        frame_free(directory);
+        return 0;
+    }
+
+    uint32_t stack_phys = frame_alloc();
+    if (stack_phys == FRAME_INVALID || stack_phys >= PAGING_IDENTITY_LIMIT) {
+        if (stack_phys != FRAME_INVALID)
+            frame_free(stack_phys);
+        frame_free(code_phys);
+        frame_free(directory);
+        return 0;
+    }
+
+    uint8_t *stack_dst = (uint8_t *)stack_phys;
+    for (uint32_t k = 0; k < PAGE_SIZE; k++)
+        stack_dst[k] = 0;
+
+    if (paging_map_in_directory(directory, TASK_RING3_STACK_VA, stack_phys,
+            PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
+        frame_free(stack_phys);
+        frame_free(code_phys);
+        frame_free(directory);
+        return 0;
+    }
+
+    task->page_directory = directory;
+
+    task->signals.pending = 0;
+    task->signals.mask = 0;
+    for (int s = 0; s < 32; s++) {
+        task->signals.handlers[s] = 0;
+    }
+
+    task->switch_esp = task_prepare_user_stack(
+        task->stack_base, task->stack_size,
+        TASK_RING3_CODE_VA, TASK_RING3_STACK_TOP
+    );
+
+    return 1;
 }
 
 int task_terminate(uint32_t id)
@@ -645,6 +847,24 @@ int task_wait(uint32_t child_id)
     }
 
     /*
+     * Close any open file descriptors.
+     */
+    for (int j = 0; j < MAX_FDS; j++) {
+        if (child->fd_table.open[j]) {
+            fs_close(&child->fd_table.handles[j]);
+            child->fd_table.open[j] = 0;
+        }
+    }
+
+    /*
+     * Send SIGCHLD to parent.
+     */
+    task_t *parent = (task_t *)task_get(parent_id);
+    if (parent != 0) {
+        parent->signals.pending |= (1u << SIGCHLD);
+    }
+
+    /*
      * Reclaim the process table slot.
      */
     child->id = 0;
@@ -668,6 +888,69 @@ int task_wait(uint32_t child_id)
     child->context.eflags = 0x202;
 
     return (int)child_id;
+}
+
+/*
+ * Signal handling functions.
+ */
+
+int sys_kill(uint32_t pid, int sig)
+{
+    if (sig < 1 || sig >= 32)
+        return 0;
+
+    if (pid == 0 || pid > MAX_TASKS)
+        return 0;
+
+    task_t *target = (task_t *)task_get(pid);
+    if (target == 0)
+        return 0;
+
+    if (target->state == TASK_UNUSED || target->state == TASK_TERMINATED)
+        return 0;
+
+    target->signals.pending |= (1u << sig);
+    return 1;
+}
+
+int sys_signal(int sig, void (*handler)(int))
+{
+    if (sig < 1 || sig >= 32)
+        return 0;
+
+    uint32_t id = scheduler_current_task();
+    task_t *task = (task_t *)task_get(id);
+    if (task == 0)
+        return 0;
+
+    task->signals.handlers[sig] = handler;
+    return 1;
+}
+
+int sys_sigprocmask(int how, uint32_t mask)
+{
+    uint32_t id = scheduler_current_task();
+    task_t *task = (task_t *)task_get(id);
+    if (task == 0)
+        return 0xFFFFFFFFU;
+
+    uint32_t old_mask = task->signals.mask;
+
+    switch (how) {
+        case 0:  /* SIG_BLOCK */
+            task->signals.mask |= mask;
+            break;
+        case 1:  /* SIG_UNBLOCK */
+            task->signals.mask &= ~mask;
+            break;
+        case 2:  /* SIG_SETMASK */
+            task->signals.mask = mask;
+            break;
+        default:
+            return 0xFFFFFFFFU;
+    }
+
+    return old_mask;
 }
 
 const task_t *task_get(uint32_t id)

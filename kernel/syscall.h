@@ -3,10 +3,20 @@
 
 #include <stdint.h>
 
-#define SYS_GETPID 1U
-#define SYS_YIELD  2U
-#define SYS_EXIT   3U
-#define SYS_WAIT   4U
+#define SYS_GETPID     1U
+#define SYS_YIELD      2U
+#define SYS_EXIT       3U
+#define SYS_WAIT       4U
+#define SYS_FORK       5U
+#define SYS_EXEC       6U
+#define SYS_GETPPID    7U
+#define SYS_GETUID     8U
+#define SYS_GETGID     9U
+#define SYS_SETSID    10U
+#define SYS_GETPGID   11U
+#define SYS_KILL      12U
+#define SYS_SIGNAL    13U
+#define SYS_SIGPROCMASK 14U
 
 void syscall_handler(uint32_t *frame);
 
