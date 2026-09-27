@@ -332,8 +332,97 @@ void line_editor_handle_char(uint8_t key)
         return;
     }
 
-    if (key == '\t' || key == KEY_TAB)
+    if (key == '\t' || key == KEY_TAB) {
+        /* Tab completion. */
+        if (cursor == line_length) {
+            /* Find the start of the current word. */
+            uint32_t word_start = cursor;
+            while (word_start > 0 && line_buffer[word_start - 1] != ' ' && line_buffer[word_start - 1] != '\t') {
+                word_start--;
+            }
+
+            /* Extract the current word prefix. */
+            uint32_t prefix_len = cursor - word_start;
+            if (prefix_len > 0) {
+                char prefix[LINE_BUFFER_SIZE];
+                for (uint32_t i = 0; i < prefix_len; i++) {
+                    prefix[i] = line_buffer[word_start + i];
+                }
+                prefix[prefix_len] = '\0';
+
+                /* Find commands that match the prefix. */
+                static const char *builtins[] = {
+                    "help", "clear", "echo", "about", "version", "mem", "uptime",
+                    "task", "taskkill", "tasks", "ps", "taskuser", "wait",
+                    "vmtest", "privtest", "exittest",
+                    "install", "run", "exittest",
+                    "format", "ls", "cat", "write", "rm", "storage-test", "diskinfo", "date",
+                    "ln", "readlink", "mv", "df", "mkdir", "rmdir", "install",
+                    "format", "ls", "cat", "write", "rm", "storage-test", "diskinfo", "date",
+                    "ln", "readlink", "mv", "df", "mkdir", "rmdir", "install",
+                    "format", "ls", "cat", "write", "rm", "storage-test", "diskinfo", "date",
+                    "ln", "readlink", "mv", "df", "mkdir", "rmdir", "install",
+                    "format", "ls", "cat", "write", "rm", "storage-test", "diskinfo", "date",
+                    "fg", "bg", "jobs", "wait", "taskkill", "taskuser",
+                    0
+                };
+
+                int match_count = 0;
+                const char *match_str = 0;
+                for (int i = 0; builtins[i]; i++) {
+                    const char *b = builtins[i];
+                    int match = 1;
+                    for (uint32_t k = 0; k < prefix_len; k++) {
+                        if (b[k] != prefix[k]) {
+                            match = 0;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        match_count++;
+                        match_str = b;
+                    }
+                }
+
+                if (match_count == 1 && match_str) {
+                    /* Single match - complete it. */
+                    uint32_t suffix_len = 0;
+                    while (match_str[suffix_len] && suffix_len < LINE_BUFFER_SIZE - line_length - 1) {
+                        suffix_len++;
+                    }
+                    if (suffix_len > prefix_len) {
+                        /* Complete the word. */
+                        for (uint32_t i = prefix_len; i < suffix_len; i++) {
+                            insert_char(match_str[i]);
+                        }
+                        /* Add a space after completion. */
+                        insert_char(' ');
+                    } else if (match_count > 1) {
+                        /* Multiple matches - show them. */
+                        terminal_putchar('\n');
+                        for (int i = 0; builtins[i]; i++) {
+                            const char *b = builtins[i];
+                            int match = 1;
+                            for (uint32_t k = 0; k < prefix_len; k++) {
+                                if (b[k] != prefix[k]) {
+                                    match = 0;
+                                    break;
+                                }
+                            }
+                            if (match) {
+                                terminal_write(b);
+                                terminal_putchar(' ');
+                            }
+                        }
+                        terminal_putchar('\n');
+                        shell_print_prompt();
+                        redraw_line();
+                    }
+                }
+        }
         return;
+    }
+    }  // Missing closing brace for line_editor_handle_char
 
     if (key < 0x20)
         return;
