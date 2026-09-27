@@ -17,6 +17,9 @@
 #define SYS_KILL      12U
 #define SYS_SIGNAL    13U
 #define SYS_SIGPROCMASK 14U
+#define SYS_PIPE      15U
+#define SYS_DUP2      16U
+#define SYS_CLOSE     17U
 
 void syscall_handler(uint32_t *frame);
 

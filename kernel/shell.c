@@ -10,6 +10,297 @@
 #include "loader.h"
 
 
+/* Maximum number of commands in a pipeline. */
+#define MAX_PIPE_CMDS 8
+
+/* Maximum number of redirections per command. */
+#define MAX_REDIRECTIONS 4
+
+/* Redirection types. */
+#define REDIR_NONE 0
+#define REDIR_IN 1      /* < */
+#define REDIR_OUT 2     /* > */
+#define REDIR_APPEND 3  /* >> */
+
+/* A single command in a pipeline. */
+typedef struct {
+    char *argv[32];     /* Command arguments */
+    int argc;           /* Number of arguments */
+    int in_redir;       /* Input redirection type */
+    char *in_file;      /* Input file for redirection */
+    int out_redir;      /* Output redirection type */
+    char *out_file;     /* Output file for redirection */
+} shell_cmd_t;
+
+/* Parse a command line into shell_cmd_t structures for pipeline execution.
+ * Returns number of commands in pipeline, or -1 on error. */
+static int shell_parse_pipeline(const char *line, shell_cmd_t *cmds, int max_cmds)
+{
+    int cmd_count = 0;
+    const char *cursor = line;
+    char token[256];
+    int token_len = 0;
+    int in_quotes = 0;
+
+    shell_cmd_t *cmd = &cmds[0];
+    cmd->argc = 0;
+    cmd->in_redir = REDIR_NONE;
+    cmd->in_file = 0;
+    cmd->out_redir = REDIR_NONE;
+    cmd->out_file = 0;
+
+    while (*cursor) {
+        char c = *cursor;
+
+        if (c == '"' || c == '\'') {
+            if (!in_quotes) {
+                in_quotes = c;
+            } else if (in_quotes == c) {
+                in_quotes = 0;
+            }
+            cursor++;
+            continue;
+        }
+
+        if (!in_quotes && (c == ' ' || c == '\t')) {
+            if (token_len > 0) {
+                token[token_len] = '\0';
+                if (cmd->argc < 32) {
+                    cmd->argv[cmd->argc++] = kmalloc(token_len + 1);
+                    for (int i = 0; i <= token_len; i++)
+                        cmd->argv[cmd->argc - 1][i] = token[i];
+                }
+                token_len = 0;
+            }
+            cursor++;
+            continue;
+        }
+
+        if (!in_quotes && c == '|') {
+            /* End of current command, start new one in pipeline. */
+            if (token_len > 0) {
+                token[token_len] = '\0';
+                if (cmd->argc < 32) {
+                    cmd->argv[cmd->argc++] = kmalloc(token_len + 1);
+                    for (int i = 0; i <= token_len; i++)
+                        cmd->argv[cmd->argc - 1][i] = token[i];
+                }
+                token_len = 0;
+            }
+
+            if (cmd->argc == 0) {
+                console_error("Syntax error: empty command in pipeline");
+                return -1;
+            }
+
+            cmd_count++;
+            if (cmd_count >= MAX_PIPE_CMDS) {
+                console_error("Too many commands in pipeline");
+                return -1;
+            }
+
+            cmd = &cmds[cmd_count];
+            cmd->argc = 0;
+            cmd->in_redir = REDIR_NONE;
+            cmd->in_file = 0;
+            cmd->out_redir = REDIR_NONE;
+            cmd->out_file = 0;
+
+            cursor++;
+            continue;
+        }
+
+        if (!in_quotes && c == '>') {
+            cursor++;
+            if (*cursor == '>') {
+                /* >> append */
+                cursor++;
+                cmd->out_redir = REDIR_APPEND;
+            } else {
+                /* > */
+                cmd->out_redir = REDIR_OUT;
+            }
+
+            /* Skip whitespace */
+            while (*cursor == ' ' || *cursor == '\t')
+                cursor++;
+
+            /* Parse output file name */
+            int fn_len = 0;
+            while (*cursor && *cursor != ' ' && *cursor != '\t' && *cursor != '|' && fn_len < FS_PATH_MAX - 1) {
+                cmd->out_file[fn_len++] = *cursor++;
+            }
+            cmd->out_file[fn_len] = '\0';
+            continue;
+        }
+
+        if (!in_quotes && c == '<') {
+            cursor++;
+            cmd->in_redir = REDIR_IN;
+
+            /* Skip whitespace */
+            while (*cursor == ' ' || *cursor == '\t')
+                cursor++;
+
+            /* Parse input file name */
+            int fn_len = 0;
+            while (*cursor && *cursor != ' ' && *cursor != '\t' && *cursor != '|' && fn_len < FS_PATH_MAX - 1) {
+                cmd->in_file[fn_len++] = *cursor++;
+            }
+            cmd->in_file[fn_len] = '\0';
+            continue;
+        }
+
+        /* Regular character */
+        if (token_len < 255) {
+            token[token_len++] = c;
+        }
+        cursor++;
+    }
+
+    /* Handle last token */
+    if (token_len > 0) {
+        token[token_len] = '\0';
+        if (cmd->argc < 32) {
+            cmd->argv[cmd->argc++] = kmalloc(token_len + 1);
+            for (int i = 0; i <= token_len; i++)
+                cmd->argv[cmd->argc - 1][i] = token[i];
+        }
+    }
+
+    if (cmd->argc == 0 && cmd_count == 0) {
+        return -1;
+    }
+
+    return cmd_count + 1;
+}
+
+/* Execute a single command with redirections. */
+static int shell_exec_cmd(shell_cmd_t *cmd, int in_fd, int out_fd)
+{
+    if (cmd->argc == 0)
+        return -1;
+
+    int stdin_fd = 0, stdout_fd = 1;
+
+    /* Set up input redirection */
+    if (cmd->in_redir == REDIR_IN) {
+        fs_handle_t fd;
+        if (fs_open(cmd->in_file, FS_ROOT, FS_OPEN_READ, &fd) != FS_OK) {
+            console_error("Cannot open input file: ");
+            terminal_write(cmd->in_file);
+            terminal_putchar('\n');
+            return -1;
+        }
+        stdin_fd = fd;
+    } else if (in_fd != 0) {
+        stdin_fd = in_fd;
+    }
+
+    /* Set up output redirection */
+    if (cmd->out_redir == REDIR_OUT) {
+        if (fs_write(cmd->out_file, FS_ROOT, "", 0) != FS_OK) {
+            console_error("Cannot create output file: ");
+            terminal_write(cmd->out_file);
+            terminal_putchar('\n');
+            return -1;
+        }
+        fs_handle_t fd;
+        if (fs_open(cmd->out_file, FS_ROOT, 0, &fd) != FS_OK) {
+            return -1;
+        }
+        stdout_fd = fd;
+    } else if (cmd->out_redir == REDIR_APPEND) {
+        fs_handle_t fd;
+        if (fs_open(cmd->out_file, FS_ROOT, FS_OPEN_WRITE | FS_OPEN_APPEND, &fd) != FS_OK) {
+            console_error("Cannot open output file for append: ");
+            terminal_write(cmd->out_file);
+            terminal_putchar('\n');
+            return -1;
+        }
+        stdout_fd = fd;
+    } else if (out_fd != 1) {
+        stdout_fd = out_fd;
+    }
+
+    /* Handle built-in commands. */
+    if (cmd->argv[0][0] == 'e' && cmd->argv[0][1] == 'c' && cmd->argv[0][2] == 'h' && cmd->argv[0][3] == 'o' && cmd->argv[0][4] == '\0') {
+        for (int i = 1; i < cmd->argc; i++) {
+            terminal_write(cmd->argv[i]);
+            terminal_write(" ");
+        }
+        terminal_putchar('\n');
+        return 0;
+    }
+
+    if (cmd->argv[0][0] == 'c' && cmd->argv[0][1] == 'd' && cmd->argv[0][2] == '\0') {
+        if (cmd->argc < 2) {
+            console_error("cd: missing argument");
+            return -1;
+        }
+        /* TODO: implement cd */
+        return 0;
+    }
+
+    /* External command - use loader_spawn. */
+    int id = loader_spawn(cmd->argv[0]);
+    if (id < 0) {
+        console_error("Command not found: ");
+        terminal_write(cmd->argv[0]);
+        terminal_putchar('\n');
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Execute a pipeline of commands. */
+static int shell_exec_pipeline(shell_cmd_t *cmds, int cmd_count)
+{
+    if (cmd_count == 1) {
+        return shell_exec_cmd(&cmds[0], 0, 1);
+    }
+
+    /* For pipelines, we need to create pipes between commands. */
+    int pipe_fds[2];
+    int prev_pipe_read = -1;
+
+    for (int i = 0; i < cmd_count; i++) {
+        int next_pipe_read = -1, next_pipe_write = -1;
+
+        if (i < cmd_count - 1) {
+            int fds[2];
+            if (sys_pipe(fds) != 1) {
+                console_error("Failed to create pipe");
+                return -1;
+            }
+            next_pipe_read = fds[0];
+            next_pipe_write = fds[1];
+        }
+
+        int ret = shell_exec_cmd(&cmds[i],
+                                 (i == 0) ? 0 : prev_pipe_read,
+                                 (i == cmd_count - 1) ? 1 : next_pipe_write);
+
+        /* Close pipe ends we don't need anymore. */
+        if (prev_pipe_read != -1) {
+            sys_close(prev_pipe_read);
+        }
+        if (next_pipe_write != -1) {
+            sys_close(next_pipe_write);
+        }
+
+        if (ret < 0) {
+            return -1;
+        }
+
+        prev_pipe_read = next_pipe_read;
+    }
+
+    return 0;
+}
+
+
 
 extern volatile uint32_t timer_ticks;
 

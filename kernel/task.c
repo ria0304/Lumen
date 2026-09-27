@@ -8,6 +8,7 @@
 #include "kmem.h"
 #include "privilege.h"
 #include "heap.h"
+#include "elf.h"
 
 extern uint32_t scheduler_current_task(void);
 
@@ -27,6 +28,172 @@ static uint8_t task_stacks[MAX_TASKS + 1][TASK_STACK_SIZE]
     __attribute__((aligned(16)));
 
 static uint32_t active_tasks = 0;
+
+/* Pipe implementation. */
+#define PIPE_BUFFER_SIZE 4096
+
+typedef struct {
+    uint8_t buffer[PIPE_BUFFER_SIZE];
+    uint32_t read_pos;
+    uint32_t write_pos;
+    uint32_t size;
+    int readers;
+    int writers;
+    int closed;
+} pipe_t;
+
+#define MAX_PIPES 16
+static pipe_t pipes[MAX_PIPES];
+
+int pipe_create(void)
+{
+    for (uint32_t i = 0; i < MAX_PIPES; i++) {
+        if (pipes[i].readers == 0 && pipes[i].writers == 0) {
+            pipes[i].read_pos = 0;
+            pipes[i].write_pos = 0;
+            pipes[i].size = 0;
+            pipes[i].readers = 1;
+            pipes[i].writers = 1;
+            pipes[i].closed = 0;
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+int pipe_read(int pipe_fd, void *buffer, uint32_t size, uint32_t *out_read)
+{
+    if (pipe_fd >= MAX_PIPES || pipe_fd < 0)
+        return -1;
+
+    pipe_t *pipe = &pipes[pipe_fd];
+    
+    if (pipe->readers == 0)
+        return -1;
+
+    uint32_t read = 0;
+    while (read < size) {
+        if (pipe->size == 0) {
+            if (pipe->writers == 0) {
+                /* EOF */
+                break;
+            }
+            /* Wait for data - in a real implementation we'd block */
+            /* For now, just return what we have */
+            break;
+        }
+
+        uint32_t chunk = pipe->size;
+        if (chunk > size - read)
+            chunk = size - read;
+
+        uint8_t *dst = (uint8_t *)buffer + read;
+        uint32_t read_pos = pipe->read_pos;
+
+        if (read_pos + chunk <= PIPE_BUFFER_SIZE) {
+            for (uint32_t i = 0; i < chunk; i++)
+                dst[i] = pipes[pipe_fd].buffer[read_pos + i];
+        } else {
+            uint32_t first_chunk = PIPE_BUFFER_SIZE - read_pos;
+            for (uint32_t i = 0; i < first_chunk; i++)
+                dst[i] = pipes[pipe_fd].buffer[read_pos + i];
+            for (uint32_t i = 0; i < chunk - first_chunk; i++)
+                dst[first_chunk + i] = pipes[pipe_fd].buffer[i];
+        }
+
+        pipe->read_pos = (pipe->read_pos + chunk) % PIPE_BUFFER_SIZE;
+        pipe->size -= chunk;
+        read += chunk;
+    }
+
+    if (out_read)
+        *out_read = read;
+    return (read > 0) ? 0 : -1;
+}
+
+int pipe_write(int pipe_fd, const void *buffer, uint32_t size, uint32_t *out_written)
+{
+    if (pipe_fd >= MAX_PIPES || pipe_fd < 0)
+        return -1;
+
+    pipe_t *pipe = &pipes[pipe_fd];
+    
+    if (pipe->writers == 0)
+        return -1;
+
+    uint32_t written = 0;
+    while (written < size) {
+        if (pipe->size >= PIPE_BUFFER_SIZE) {
+            /* Buffer full - wait for space */
+            break;
+        }
+
+        uint32_t free_space = PIPE_BUFFER_SIZE - pipe->size;
+        uint32_t chunk = size - written;
+        if (chunk > free_space)
+            chunk = free_space;
+
+        uint8_t *src = (uint8_t *)buffer + written;
+        uint32_t write_pos = pipe->write_pos;
+
+        if (write_pos + chunk <= PIPE_BUFFER_SIZE) {
+            for (uint32_t i = 0; i < chunk; i++)
+                pipe->buffer[write_pos + i] = src[i];
+        } else {
+            uint32_t first_chunk = PIPE_BUFFER_SIZE - write_pos;
+            for (uint32_t i = 0; i < first_chunk; i++)
+                pipe->buffer[write_pos + i] = src[i];
+            for (uint32_t i = 0; i < chunk - first_chunk; i++)
+                pipe->buffer[i] = src[first_chunk + i];
+        }
+
+        pipe->write_pos = (pipe->write_pos + chunk) % PIPE_BUFFER_SIZE;
+        pipe->size += chunk;
+        written += chunk;
+    }
+
+    if (out_written)
+        *out_written = written;
+    return (written > 0) ? 0 : -1;
+}
+
+int pipe_close_read(int pipe_fd)
+{
+    if (pipe_fd >= MAX_PIPES || pipe_fd < 0)
+        return -1;
+
+    pipe_t *pipe = &pipes[pipe_fd];
+    if (pipe->readers == 0)
+        return -1;
+
+    pipe->readers--;
+    if (pipe->readers == 0 && pipe->writers == 0) {
+        /* Pipe fully closed, clean up */
+        pipe->size = 0;
+        pipe->read_pos = 0;
+        pipe->write_pos = 0;
+    }
+    return 0;
+}
+
+int pipe_close_write(int pipe_fd)
+{
+    if (pipe_fd >= MAX_PIPES || pipe_fd < 0)
+        return -1;
+
+    pipe_t *pipe = &pipes[pipe_fd];
+    if (pipe->writers == 0)
+        return -1;
+
+    pipe->writers--;
+    if (pipe->writers == 0 && pipe->readers == 0) {
+        pipe->size = 0;
+        pipe->read_pos = 0;
+        pipe->write_pos = 0;
+    }
+    return 0;
+}
+
 
 static uint32_t task_prepare_stack(
     uint32_t stack_base,
@@ -532,6 +699,220 @@ int task_create_user_program(const uint8_t *code, uint32_t code_size)
     return task_create_ring3_with_code(code, code_size);
 }
 
+/* Create a Ring 3 task from an ELF executable image.
+ * This parses the ELF headers and maps each PT_LOAD segment
+ * into the task's address space with appropriate permissions. */
+int task_create_user_elf(const Elf32_Ehdr *ehdr, const void *buffer, uint32_t size)
+{
+    if (size < sizeof(Elf32_Ehdr))
+        return -1;
+
+    /* Verify ELF magic. */
+    if (ehdr->e_ident[EI_MAG0] != ELFMAG0 ||
+        ehdr->e_ident[EI_MAG1] != ELFMAG1 ||
+        ehdr->e_ident[EI_MAG2] != ELFMAG2 ||
+        ehdr->e_ident[EI_MAG3] != ELFMAG3) {
+        return -1;
+    }
+
+    if (ehdr->e_ident[EI_CLASS] != ELFCLASS32 ||
+        ehdr->e_ident[EI_DATA] != ELFDATA2LSB ||
+        ehdr->e_type != ET_EXEC ||
+        ehdr->e_machine != EM_386) {
+        return -1;
+    }
+
+    uint32_t i;
+
+    for (i = 1; i <= MAX_TASKS; i++) {
+
+        if (tasks[i].state == TASK_UNUSED ||
+            tasks[i].state == TASK_TERMINATED)
+            break;
+    }
+
+    if (i > MAX_TASKS)
+        return -1;
+
+    tasks[i].id = i;
+    tasks[i].parent_id = scheduler_current_task();
+    tasks[i].state = TASK_READY;
+    tasks[i].privilege = USER_RING;
+
+    tasks[i].stack_base = (uint32_t)&task_stacks[i][0];
+    tasks[i].stack_size = TASK_STACK_SIZE;
+
+    tasks[i].context.eax = 0;
+    tasks[i].context.ebx = 0;
+    tasks[i].context.ecx = 0;
+    tasks[i].context.edx = 0;
+    tasks[i].context.esi = 0;
+    tasks[i].context.edi = 0;
+    tasks[i].context.eflags = 0x202;
+
+    __asm__ volatile ("cli");
+
+    uint32_t directory = paging_create_address_space();
+
+    if (directory == FRAME_INVALID) {
+        tasks[i].state = TASK_UNUSED;
+        __asm__ volatile ("sti");
+        return -1;
+    }
+
+/* Parse program headers and map each PT_LOAD segment. */
+    const Elf32_Phdr *phdr = (const Elf32_Phdr *)((const uint8_t *)ehdr + ehdr->e_phoff);
+
+    /* Track physical pages allocated for this task's segments.
+     * We need to track them because paging_virtual_to_physical only works
+     * with the current CR3, not an arbitrary directory. */
+    uint32_t segment_phys[16];  /* Max 16 pages per segment */
+    uint32_t segment_vaddr[16];
+    uint32_t segment_pages = 0;
+
+    for (uint16_t j = 0; j < ehdr->e_phnum; j++) {
+        const Elf32_Phdr *ph = &phdr[j];
+
+        if (ph->p_type != PT_LOAD)
+            continue;
+
+        if (ph->p_memsz == 0)
+            continue;
+
+        uint32_t vaddr = ph->p_vaddr;
+        uint32_t memsz = ph->p_memsz;
+        uint32_t seg_flags = ph->p_flags;
+
+        /* Align to page boundary. */
+        uint32_t vaddr_aligned = vaddr & ~0xFFF;
+        uint32_t end_addr = (vaddr + memsz + 0xFFF) & ~0xFFF;
+        uint32_t num_pages = (end_addr - vaddr_aligned) / PAGE_SIZE;
+
+        if (vaddr_aligned < TASK_RING3_CODE_VA || vaddr_aligned >= 0xC0000000) {
+            console_error("Loader: invalid virtual address");
+            return -1;
+        }
+
+        /* Allocate and map pages. Track physical pages for data copy. */
+        for (uint32_t p = 0; p < num_pages; p++) {
+            uint32_t page_vaddr = vaddr_aligned + p * PAGE_SIZE;
+            uint32_t page_phys = frame_alloc();
+
+            if (page_phys == FRAME_INVALID || page_phys >= PAGING_IDENTITY_LIMIT) {
+                /* Cleanup on failure. */
+                for (uint32_t k = 0; k < p; k++)
+                    frame_free(vaddr_aligned + k * PAGE_SIZE);
+                return -1;
+            }
+
+            uint32_t page_flags = PAGE_PRESENT | PAGE_USER;
+            if (seg_flags & PF_W)
+                page_flags |= PAGE_WRITE;
+
+            if (paging_map_in_directory(directory, page_vaddr, page_phys, page_flags) != 0) {
+                for (uint32_t k = 0; k < p; k++)
+                    frame_free(vaddr_aligned + k * PAGE_SIZE);
+                return -1;
+            }
+
+            /* Track physical page for data copy. */
+            if (segment_pages < 16) {
+                segment_phys[segment_pages] = page_phys;
+                segment_vaddr[segment_pages] = page_vaddr;
+                segment_pages++;
+            }
+        }
+
+        /* Copy file data into mapped pages using tracked physical pages. */
+        if (ph->p_filesz > 0) {
+            const uint8_t *src = (const uint8_t *)((const uint8_t *)buffer + ph->p_offset);
+            uint32_t remaining = ph->p_filesz;
+            uint32_t pos = 0;
+
+            while (remaining > 0) {
+                uint32_t page_offset = (ph->p_vaddr + pos) & 0xFFF;
+                uint32_t page_vaddr = ph->p_vaddr + pos;
+
+                /* Find the physical page for this virtual address. */
+                uint32_t page_phys = 0;
+                for (uint32_t p = 0; p < segment_pages; p++) {
+                    uint32_t seg_start = segment_vaddr[p];
+                    uint32_t seg_end = seg_start + PAGE_SIZE;
+                    if (page_vaddr >= seg_start && page_vaddr < seg_end) {
+                        page_phys = segment_phys[p];
+                        break;
+                    }
+                }
+
+                if (page_phys == 0) {
+                    console_error("Loader: page not mapped");
+                    return -1;
+                }
+
+                uint32_t chunk = PAGE_SIZE - page_offset;
+                if (chunk > remaining)
+                    chunk = remaining;
+
+                /* Copy to physical page. */
+                uint8_t *dst = (uint8_t *)page_phys + page_offset;
+                for (uint32_t k = 0; k < chunk; k++)
+                    dst[k] = src[k];
+
+                pos += chunk;
+                remaining -= chunk;
+            }
+        }
+    }
+
+    /* Map stack. */
+    uint32_t stack_phys = frame_alloc();
+    if (stack_phys == FRAME_INVALID || stack_phys >= PAGING_IDENTITY_LIMIT) {
+        return -1;
+    }
+
+    if (paging_map_in_directory(directory, TASK_RING3_STACK_VA - PAGE_SIZE, stack_phys,
+            PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
+        frame_free(stack_phys);
+        return -1;
+    }
+
+    /* Zero the stack page. */
+    uint8_t *stack_dst = (uint8_t *)stack_phys;
+    for (uint32_t k = 0; k < PAGE_SIZE; k++)
+        stack_dst[k] = 0;
+
+    /* Set up the task. */
+    tasks[i].page_directory = directory;
+
+    for (int j = 0; j < MAX_FDS; j++) {
+        tasks[i].fd_table.open[j] = 0;
+    }
+    tasks[i].cwd_inode = tasks[0].cwd_inode;
+
+    tasks[i].signals.pending = 0;
+    tasks[i].signals.mask = 0;
+    for (int s = 0; s < 32; s++) {
+        tasks[i].signals.handlers[s] = 0;
+    }
+
+    tasks[i].context.eip = ehdr->e_entry;
+    tasks[i].context.esp = TASK_RING3_STACK_TOP;
+
+    tasks[i].switch_esp =
+        task_prepare_user_stack(
+            tasks[i].stack_base,
+            tasks[i].stack_size,
+            TASK_RING3_CODE_VA,
+            TASK_RING3_STACK_TOP
+        );
+
+    __asm__ volatile ("sti");
+
+    active_tasks++;
+
+    return (int)i;
+}
+
 int task_fork(void)
 {
     uint32_t parent_id = scheduler_current_task();
@@ -951,6 +1332,107 @@ int sys_sigprocmask(int how, uint32_t mask)
     }
 
     return old_mask;
+}
+
+/*
+ * File descriptor and pipe syscalls.
+ */
+
+int sys_pipe(int *fds)
+{
+    int pipe_fd = pipe_create();
+    if (pipe_fd < 0)
+        return 0;
+
+    uint32_t id = scheduler_current_task();
+    task_t *task = (task_t *)task_get(id);
+    if (task == 0)
+        return 0;
+
+    int read_fd = -1, write_fd = -1;
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (!task->fd_table.open[i]) {
+            if (read_fd == -1)
+                read_fd = i;
+            else if (write_fd == -1) {
+                write_fd = i;
+                break;
+            }
+        }
+    }
+
+    if (read_fd == -1 || write_fd == -1) {
+        /* Close the pipe if we can't allocate fds */
+        pipe_close_read(pipe_fd);
+        pipe_close_write(pipe_fd);
+        return 0;
+    }
+
+    task->fd_table.handles[read_fd].inode = pipe_fd;
+    task->fd_table.open[read_fd] = 1;
+    task->fd_table.handles[write_fd].inode = pipe_fd;
+    task->fd_table.open[write_fd] = 1;
+
+    fds[0] = read_fd;
+    fds[1] = write_fd;
+
+    return 1;
+}
+
+int sys_dup2(int oldfd, int newfd)
+{
+    if (oldfd < 0 || oldfd >= MAX_FDS || newfd < 0 || newfd >= MAX_FDS)
+        return 0;
+
+    uint32_t id = scheduler_current_task();
+    task_t *task = (task_t *)task_get(scheduler_current_task());
+    if (task == 0)
+        return 0;
+
+    if (task->fd_table.open[oldfd] == 0)
+        return 0;
+
+    if (oldfd == newfd)
+        return 1;
+
+    if (task->fd_table.open[newfd]) {
+        /* Close the newfd first */
+        fs_close(&task->fd_table.handles[newfd]);
+        task->fd_table.open[newfd] = 0;
+    }
+
+    task->fd_table.handles[newfd] = task->fd_table.handles[oldfd];
+    task->fd_table.open[newfd] = 1;
+
+    return 1;
+}
+
+int sys_close(int fd)
+{
+    if (fd < 0 || fd >= MAX_FDS)
+        return 0;
+
+    uint32_t id = scheduler_current_task();
+    task_t *task = (task_t *)task_get(id);
+    if (task == 0)
+        return 0;
+
+    if (task->fd_table.open[fd] == 0)
+        return 0;
+
+    /* For pipes, close the appropriate end */
+    uint32_t pipe_fd = task->fd_table.handles[fd].inode;
+    if (pipe_fd < MAX_PIPES) {
+        /* Determine if this is read or write end by checking the pipe's readers/writers */
+        /* For simplicity, we'll just close both ends */
+        pipe_close_read(pipe_fd);
+        pipe_close_write(pipe_fd);
+    } else {
+        fs_close(&task->fd_table.handles[fd]);
+    }
+
+    task->fd_table.open[fd] = 0;
+    return 1;
 }
 
 const task_t *task_get(uint32_t id)

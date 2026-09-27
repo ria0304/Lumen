@@ -196,6 +196,38 @@ void syscall_handler(uint32_t *frame)
             break;
         }
 
+        case SYS_PIPE:
+        {
+            /*
+             * EAX = pointer to array of 2 integers for file descriptors
+             */
+            int *fds = (int *)frame[4];
+            frame[7] = sys_pipe(fds) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_DUP2:
+        {
+            /*
+             * EBX = oldfd
+             * ECX = newfd
+             */
+            int oldfd = frame[4];
+            int newfd = frame[5];
+            frame[7] = sys_dup2(oldfd, newfd) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_CLOSE:
+        {
+            /*
+             * EBX = fd
+             */
+            int fd = frame[4];
+            frame[7] = sys_close(fd) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
         default:
             frame[7] = 0xFFFFFFFFU;
             console_error(

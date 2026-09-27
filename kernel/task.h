@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "privilege.h"
 #include "fs.h"
+#include "elf.h"
 
 #define MAX_TASKS 16
 #define TASK_STACK_SIZE 4096
@@ -86,12 +87,20 @@ int task_create_with_privilege(uint32_t privilege);
  */
 int task_create_user_program(const uint8_t *code, uint32_t code_size);
 
+/* Create a Ring 3 task from an ELF executable image.
+ * This parses the ELF headers and maps each PT_LOAD segment
+ * into the task's address space with appropriate permissions. */
+int task_create_user_elf(const Elf32_Ehdr *ehdr, const void *buffer, uint32_t size);
+
 int task_fork(void);
 int sys_exec(const char *filename);
 
 int sys_kill(uint32_t pid, int sig);
 int sys_signal(int sig, void (*handler)(int));
 int sys_sigprocmask(int how, uint32_t mask);
+int sys_pipe(int *fds);
+int sys_dup2(int oldfd, int newfd);
+int sys_close(int fd);
 
 int task_terminate(uint32_t id);
 int task_block(uint32_t id);

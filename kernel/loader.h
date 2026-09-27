@@ -15,4 +15,9 @@
  */
 int loader_spawn(const char *filename);
 
+/* Load an ELF executable from the filesystem and start it as a
+ * Ring 3 task. Supports proper ELF executables with program headers.
+ * Returns the new task's id on success, or -1 on failure. */
+int loader_spawn_elf(const char *filename);
+
 #endif
