@@ -34,45 +34,31 @@ start:
     mov word [remaining], KERNEL_SECTORS
 
     mov ah, 0
-    mov dl, 0
+    mov dl, [boot_drive]
     int 0x13
 
 .load_loop:
     xor ax, ax
     mov ds, ax
 
+    mov byte [dap_size], 16
+    mov byte [dap_rsvd], 0
+    mov word [dap_count], 1
+    mov ax, [dest_off]
+    mov [dap_off], ax
+    mov ax, [dest_seg]
+    mov [dap_seg], ax
     mov ax, [lba]
-    xor dx, dx
-    mov bx, 36
-    div bx
-    mov [cylinder], ax
-    mov ax, dx
-    xor dx, dx
-    mov bx, 18
-    div bx
-    mov [head], al
-    inc dl
-    mov [sect], dl
+    mov [dap_lba], ax
+    mov word [dap_lba+2], 0
+    mov word [dap_lba+4], 0
+    mov word [dap_lba+6], 0
 
-    mov ah, 0x02
-    mov al, 1
-    mov ch, [cylinder]
-    mov cl, [sect]
-    mov al, [cylinder]
-    shr al, 6
-    shl al, 6
-    or cl, al
-    mov dh, [head]
-    mov dl, 0
-    mov es, [dest_seg]
-    mov bx, [dest_off]
-    int 0x13
-    jnc .read_ok
-    mov dl, 1
+    mov ah, 0x42
+    mov dl, [boot_drive]
+    mov si, dap_size
     int 0x13
     jc disk_error
-
-.read_ok:
 
     mov ax, [dest_off]
     add ax, 512
@@ -195,20 +181,23 @@ protected_mode_entry:
 BITS 16
 
 boot_drive db 0
-cylinder   dw 0
-head       db 0
-sect       db 0
+dap_size   db 16
+dap_rsvd   db 0
+dap_count  dw 1
+dap_off    dw 0
+dap_seg    dw 0
+dap_lba    dq 0
 dest_seg   dw 0x0000
 dest_off   dw 0x0000
 lba        dw 0x0000
 remaining  dw 0x0000
 
-loading_msg    db "L", 0
-read_ok_msg    db "O", 0
-a20_ok_msg     db "A", 0
-gdt_ok_msg     db "G", 0
-pm_msg         db "P", 0
-disk_error_msg db "E", 0
+loading_msg    db "Loading kernel...", 0
+read_ok_msg    db " READ_OK", 0
+a20_ok_msg     db " A20_OK", 0
+gdt_ok_msg     db " GDT_OK", 0
+pm_msg         db " PM_START", 0
+disk_error_msg db " DISK_ERROR", 0
 
 
 gdt_start:

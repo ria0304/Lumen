@@ -118,9 +118,8 @@ test:
 	   $(BUILD_TEST)/lumer.img $(TEST_DISK)
 	@echo "  TEST    booting headless, capturing serial output..."
 	@timeout 60 qemu-system-i386 -display none -serial stdio \
-	    -boot order=a \
-	    -drive file=$(BUILD_TEST)/lumer.img,format=raw,if=floppy \
-	    -drive file=$(TEST_DISK),format=raw,if=ide \
+	    -boot order=c \
+	    -drive file=$(BUILD_TEST)/lumer.img,format=raw,if=ide \
 	    -device isa-debug-exit \
 	    < /dev/null > $(TEST_LOG) 2>&1; true
 	@grep -E 'SELFTEST' $(TEST_LOG) || true
