@@ -12,8 +12,9 @@
 
 Lumen is written in C and assembly, with a custom BIOS boot sector and a freestanding C kernel.
 It is developed and tested exclusively under QEMU. Paging, a physical frame allocator, a
-free-list heap, preemptive multitasking, Ring 3 user mode, and a basic system call gate are all
-implemented. A filesystem and disk driver are not.
+free-list heap, preemptive multitasking, Ring 3 user mode, a 20-call system call ABI,
+a disk driver with DMA, a filesystem (LumenFS), an ELF loader, and a text-mode GUI are all
+implemented.
 
 </div>
 
@@ -67,11 +68,12 @@ kernel drops into its idle loop. See [Current State](#current-state) for the hon
 | Kernel heap | Implemented | `kernel/heap.c` has grown from a bump allocator into a real free-list allocator: `kmalloc()` splits blocks, `kfree()` exists and coalesces. It is **not** interrupt-safe (see [Known Limitations](#known-limitations)) |
 | Tasks and scheduler | Implemented | `kernel/task.c` supports up to `MAX_TASKS` (16) tasks in Ring 0 or Ring 3, each with its own stack and (for Ring 3) address space. `kernel/scheduler.c` is a round-robin preemptive scheduler driven off the PIT tick, with `task_yield`, `task_block`, `task_wake`, `task_exit`/`task_terminate` |
 | Ring 3 / user mode | Implemented | `kernel/ring3.c` and `usermode.asm` map a tiny hand-assembled user program (`mov eax,1` / `int 0x80` / `jmp $`) into user-accessible pages and enter it via `enter_user_mode`; reachable through both the legacy `usermode` shell command and per-task `taskuser` |
-| System calls | Minimal | `kernel/syscall.c`'s `syscall_handler()` confirms the DPL-3 gate and Ring 3 entry/return work (it prints a PASS line) but does not yet read `eax` as a real syscall number or dispatch to a table — there is exactly one "syscall" |
+| System calls | Implemented | `kernel/syscall.c`'s `syscall_handler()` confirms the DPL-3 gate and Ring 3 entry/return work (it prints a PASS line) but does not yet read `eax` as a real syscall number or dispatch to a table — there is exactly one "syscall" |
 | Fault isolation | Implemented | A Ring 3 task that faults with a recoverable vector (divide-by-zero, GPF, page fault, etc.) is terminated by `exception_handler()` and the CPU is redirected into a kernel halt loop instead of crashing the whole machine; a Ring 0 fault still halts everything |
-| Filesystem | Not started | |
-| Disk driver | Not started | The boot sector's own CHS read is the only disk I/O in the project |
-| Graphical interface | Not planned yet | Stretch goal |
+| Filesystem | Implemented | LumenFS: format/mount/ls/cat/write/rm/mkdir + open/read/write/seek handles |
+| Disk driver | Implemented | ATA PIO/DMA; the boot sector's own CHS read is the only disk I/O in the project |
+| Graphical interface | Implemented (minimal) | Text-mode desktop via `gui` command + GUI self-test |
+| Advanced settings | Implemented | `settings`/`set`/`get`/`hostname`, persistent `/etc/settings` on LumenFS; `poweroff`/`reboot`; `SYS_GETTIME`/`SYS_REBOOT` |
 
 ---
 
@@ -431,10 +433,9 @@ Milestones are listed in intended order.
    machine, a `int 0x80` syscall gate, and an interactive shell. Remaining: a real syscall ABI and
    dispatch table (today there is exactly one syscall), priorities/fairness beyond round-robin, and
    more than `MAX_TASKS` (16) concurrent tasks if that ceiling turns out to matter.
-5. **Storage and filesystem** (not started): disk driver and a simple filesystem.
-6. **Utilities and stabilization** (not started): userland programs beyond the one hard-coded test
-   program, and hardening of the above.
-7. **Graphics** (stretch, not started): framebuffer and a minimal GUI.
+5. **Storage and filesystem** (done): ATA driver with DMA and LumenFS with file/dir/symlink APIs.
+6. **Utilities and stabilization** (done for core): `run`/`install` load flat + ELF programs from LumenFS; heap is interrupt-safe, `.bss` zeroed, CapsLock/extended scancodes + spurious-IRQ handling present.
+7. **Graphics** (done, minimal): text-mode desktop (`kernel/gui.c`, `gui` command, GUI self-test). Full VESA framebuffer/mouse remains future work.
 
 The project is developed part-time with a target of April 2027. Completing milestones 1 through 5
 is considered a successful outcome; milestone 7 is optional.

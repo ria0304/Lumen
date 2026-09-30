@@ -16,6 +16,11 @@
 #include "ata.h"
 #include "rtc.h"
 #include "fs.h"
+#include "gui.h"
+#include "settings.h"
+#include "users.h"
+#include "net.h"
+#include "pkg.h"
 #include "serial.h"
 
 extern void kbd_init(void);
@@ -377,6 +382,15 @@ void kmain(void)
     }
 
     report_self_test("HEAP", heap_run_self_test());
+    report_self_test("GUI", gui_run_self_test());
+    settings_init();
+    report_self_test("SETTINGS", settings_run_self_test());
+    users_init();
+    report_self_test("USERS", users_run_self_test());
+    net_init();
+    report_self_test("NET", net_run_self_test());
+    pkg_init();
+    report_self_test("PKG", pkg_run_self_test());
 
     char *buffer = (char *)kmalloc(64);
 

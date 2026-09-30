@@ -4,6 +4,8 @@
 #include "task.h"
 #include "scheduler.h"
 #include "console.h"
+#include "rtc.h"
+#include "net.h"
 
 void syscall_handler(uint32_t *frame)
 {
@@ -225,6 +227,72 @@ void syscall_handler(uint32_t *frame)
              */
             int fd = frame[4];
             frame[7] = sys_close(fd) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_OPEN:
+        {
+            const char *path = (const char *)frame[4];
+            uint32_t flags = frame[5];
+            int fd = sys_open(path, flags);
+            frame[7] = (fd >= 0) ? (uint32_t)fd : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_READ:
+        {
+            int fd = frame[4];
+            void *buf = (void *)frame[5];
+            uint32_t len = frame[6];
+            int n = sys_read(fd, buf, len);
+            frame[7] = (n >= 0) ? (uint32_t)n : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_WRITE:
+        {
+            int fd = frame[4];
+            const void *buf = (const void *)frame[5];
+            uint32_t len = frame[6];
+            int n = sys_write(fd, buf, len);
+            frame[7] = (n >= 0) ? (uint32_t)n : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_GETTIME:
+        {
+            rtc_time_t *out = (rtc_time_t *)frame[4];
+            frame[7] = (out && rtc_read(out) == 0) ? 0 : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_REBOOT:
+        {
+            /* workers: triple-fault via IDT load of NULL, else halt */
+            __asm__ volatile("cli; hlt");
+            frame[7] = 0;
+            break;
+        }
+
+        case SYS_SOCKET:
+            frame[7] = 0; /* loopback fd 0 */
+            break;
+
+        case SYS_SEND:
+        {
+            const void *buf = (const void *)frame[4];
+            uint32_t len = frame[5];
+            int n = buf ? net_send(buf, len) : -1;
+            frame[7] = (n >= 0) ? (uint32_t)n : 0xFFFFFFFFU;
+            break;
+        }
+
+        case SYS_RECV:
+        {
+            void *buf = (void *)frame[4];
+            uint32_t len = frame[5];
+            int n = buf ? net_recv(buf, len) : -1;
+            frame[7] = (n >= 0) ? (uint32_t)n : 0xFFFFFFFFU;
             break;
         }
 

@@ -101,6 +101,9 @@ int sys_sigprocmask(int how, uint32_t mask);
 int sys_pipe(int *fds);
 int sys_dup2(int oldfd, int newfd);
 int sys_close(int fd);
+int sys_open(const char *path, uint32_t flags);
+int sys_read(int fd, void *buf, uint32_t len);
+int sys_write(int fd, const void *buf, uint32_t len);
 
 int task_terminate(uint32_t id);
 int task_block(uint32_t id);

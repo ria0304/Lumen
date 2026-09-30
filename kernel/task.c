@@ -1435,6 +1435,37 @@ int sys_close(int fd)
     return 1;
 }
 
+
+int sys_open(const char *path, uint32_t flags)
+{
+    if (!path) return -1;
+    uint32_t id = scheduler_current_task();
+    task_t *task = (task_t *)task_get(id);
+    if (!task) return -1;
+    int slot = -1;
+    for (int i = 0; i < MAX_FDS; i++) if (!task->fd_table.open[i]) { slot = i; break; }
+    if (slot < 0) return -1;
+    if (fs_open(path, FS_ROOT, flags, &task->fd_table.handles[slot]) != FS_OK) return -1;
+    task->fd_table.open[slot] = 1;
+    return slot;
+}
+int sys_read(int fd, void *buf, uint32_t len)
+{
+    if (fd < 0 || fd >= MAX_FDS || !buf) return -1;
+    uint32_t id = scheduler_current_task();
+    task_t *task = (task_t *)task_get(id);
+    if (!task || !task->fd_table.open[fd]) return -1;
+    uint32_t n=0; return fs_handle_read(&task->fd_table.handles[fd], buf, len, &n)==FS_OK?(int)n:-1;
+}
+int sys_write(int fd, const void *buf, uint32_t len)
+{
+    if (fd < 0 || fd >= MAX_FDS || !buf) return -1;
+    uint32_t id = scheduler_current_task();
+    task_t *task = (task_t *)task_get(id);
+    if (!task || !task->fd_table.open[fd]) return -1;
+    uint32_t n=0; return fs_handle_write(&task->fd_table.handles[fd], buf, len, &n)==FS_OK?(int)n:-1;
+}
+
 const task_t *task_get(uint32_t id)
 {
     if (id > MAX_TASKS)

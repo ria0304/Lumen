@@ -20,6 +20,14 @@
 #define SYS_PIPE      15U
 #define SYS_DUP2      16U
 #define SYS_CLOSE     17U
+#define SYS_OPEN      18U
+#define SYS_READ      19U
+#define SYS_WRITE     20U
+#define SYS_GETTIME     21U
+#define SYS_REBOOT     22U
+#define SYS_SOCKET     23U
+#define SYS_SEND       24U
+#define SYS_RECV       25U
 
 void syscall_handler(uint32_t *frame);
 
