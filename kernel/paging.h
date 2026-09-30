@@ -92,6 +92,15 @@ uint32_t paging_get_physical_from_directory(
     uint32_t virtual_address
 );
 
+/*
+ * Get the PTE flags for a virtual address in a specific page
+ * directory. Returns 0 when the PDE or PTE is not present.
+ */
+uint32_t paging_flags_from_directory(
+    uint32_t directory_physical,
+    uint32_t virtual_address
+);
+
 uint32_t paging_directory_entries_used(void);
 
 int paging_run_self_test(void);

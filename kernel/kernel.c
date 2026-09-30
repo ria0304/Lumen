@@ -26,6 +26,7 @@
 #include "cron.h"
 #include "gfx.h"
 #include "nic.h"
+#include "uaccess.h"
 #include "serial.h"
 
 extern void kbd_init(void);
@@ -360,6 +361,8 @@ void kmain(void)
     scheduler_init();
 
     report_self_test("SCHEDULER", scheduler_run_self_test());
+
+    report_self_test("SYSCALL", syscall_run_self_test());
 
     heap_init();
     console_info("Memory allocator: OK");

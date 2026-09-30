@@ -6,6 +6,7 @@
 #include "console.h"
 #include "rtc.h"
 #include "net.h"
+#include "uaccess.h"
 
 void syscall_handler(uint32_t *frame)
 {
@@ -26,6 +27,18 @@ void syscall_handler(uint32_t *frame)
      */
     uint32_t syscall_number =
         frame[7];
+
+    /*
+     * Pointer validation: a Ring 3 caller may only pass
+     * pointers into its own user-mapped pages below the
+     * kernel boundary. Ring 0 callers are trusted kernel
+     * code and skip the check.
+     */
+    const task_t *caller = task_get(scheduler_current_task());
+    int caller_is_user =
+        caller != 0 && caller->privilege == USER_RING;
+    uint32_t caller_dir =
+        caller != 0 ? caller->page_directory : 0;
 
     switch (syscall_number) {
 
@@ -157,8 +170,24 @@ void syscall_handler(uint32_t *frame)
             /*
              * EBX = filename pointer
              */
-            const char *filename = (const char *)frame[4];
-            frame[7] = sys_exec(filename) ? 0 : 0xFFFFFFFFU;
+            uint32_t upath = frame[4];
+            char kpath[UACCESS_MAX_STRING];
+
+            if (caller_is_user &&
+                copy_string_from_user(
+                    kpath,
+                    upath,
+                    sizeof(kpath),
+                    caller_dir
+                ) < 0) {
+                frame[7] = 0xFFFFFFFFU;
+                break;
+            }
+
+            const char *path =
+                caller_is_user ? kpath : (const char *)upath;
+
+            frame[7] = sys_exec(path) ? 0 : 0xFFFFFFFFU;
             break;
         }
 
@@ -181,7 +210,15 @@ void syscall_handler(uint32_t *frame)
              * ECX = handler
              */
             uint32_t sig = frame[4];
-            void (*handler)(int) = (void (*)(int))frame[5];
+            uint32_t uhandler = frame[5];
+            void (*handler)(int) = (void (*)(int))uhandler;
+
+            if (caller_is_user &&
+                uaccess_check(caller_dir, uhandler, 4, 0) != 0) {
+                frame[7] = 0xFFFFFFFFU;
+                break;
+            }
+
             frame[7] = sys_signal(sig, handler) ? 0 : 0xFFFFFFFFU;
             break;
         }
@@ -203,7 +240,20 @@ void syscall_handler(uint32_t *frame)
             /*
              * EAX = pointer to array of 2 integers for file descriptors
              */
-            int *fds = (int *)frame[4];
+            uint32_t ufds = frame[4];
+            int *fds = (int *)ufds;
+
+            if (caller_is_user &&
+                uaccess_check(
+                    caller_dir,
+                    ufds,
+                    2 * sizeof(int),
+                    1
+                ) != 0) {
+                frame[7] = 0xFFFFFFFFU;
+                break;
+            }
+
             frame[7] = sys_pipe(fds) ? 0 : 0xFFFFFFFFU;
             break;
         }
@@ -232,8 +282,24 @@ void syscall_handler(uint32_t *frame)
 
         case SYS_OPEN:
         {
-            const char *path = (const char *)frame[4];
+            uint32_t upath = frame[4];
             uint32_t flags = frame[5];
+            char kpath[UACCESS_MAX_STRING];
+
+            if (caller_is_user &&
+                copy_string_from_user(
+                    kpath,
+                    upath,
+                    sizeof(kpath),
+                    caller_dir
+                ) < 0) {
+                frame[7] = 0xFFFFFFFFU;
+                break;
+            }
+
+            const char *path =
+                caller_is_user ? kpath : (const char *)upath;
+
             int fd = sys_open(path, flags);
             frame[7] = (fd >= 0) ? (uint32_t)fd : 0xFFFFFFFFU;
             break;
@@ -242,8 +308,16 @@ void syscall_handler(uint32_t *frame)
         case SYS_READ:
         {
             int fd = frame[4];
-            void *buf = (void *)frame[5];
+            uint32_t ubuf = frame[5];
+            void *buf = (void *)ubuf;
             uint32_t len = frame[6];
+
+            if (caller_is_user &&
+                uaccess_check(caller_dir, ubuf, len, 1) != 0) {
+                frame[7] = 0xFFFFFFFFU;
+                break;
+            }
+
             int n = sys_read(fd, buf, len);
             frame[7] = (n >= 0) ? (uint32_t)n : 0xFFFFFFFFU;
             break;
@@ -252,8 +326,16 @@ void syscall_handler(uint32_t *frame)
         case SYS_WRITE:
         {
             int fd = frame[4];
-            const void *buf = (const void *)frame[5];
+            uint32_t ubuf = frame[5];
+            const void *buf = (const void *)ubuf;
             uint32_t len = frame[6];
+
+            if (caller_is_user &&
+                uaccess_check(caller_dir, ubuf, len, 0) != 0) {
+                frame[7] = 0xFFFFFFFFU;
+                break;
+            }
+
             int n = sys_write(fd, buf, len);
             frame[7] = (n >= 0) ? (uint32_t)n : 0xFFFFFFFFU;
             break;
@@ -261,7 +343,20 @@ void syscall_handler(uint32_t *frame)
 
         case SYS_GETTIME:
         {
-            rtc_time_t *out = (rtc_time_t *)frame[4];
+            uint32_t uout = frame[4];
+            rtc_time_t *out = (rtc_time_t *)uout;
+
+            if (caller_is_user &&
+                uaccess_check(
+                    caller_dir,
+                    uout,
+                    sizeof(rtc_time_t),
+                    1
+                ) != 0) {
+                frame[7] = 0xFFFFFFFFU;
+                break;
+            }
+
             frame[7] = (out && rtc_read(out) == 0) ? 0 : 0xFFFFFFFFU;
             break;
         }
@@ -280,8 +375,16 @@ void syscall_handler(uint32_t *frame)
 
         case SYS_SEND:
         {
-            const void *buf = (const void *)frame[4];
+            uint32_t ubuf = frame[4];
+            const void *buf = (const void *)ubuf;
             uint32_t len = frame[5];
+
+            if (caller_is_user &&
+                uaccess_check(caller_dir, ubuf, len, 0) != 0) {
+                frame[7] = 0xFFFFFFFFU;
+                break;
+            }
+
             int n = buf ? net_send(buf, len) : -1;
             frame[7] = (n >= 0) ? (uint32_t)n : 0xFFFFFFFFU;
             break;
@@ -289,8 +392,16 @@ void syscall_handler(uint32_t *frame)
 
         case SYS_RECV:
         {
-            void *buf = (void *)frame[4];
+            uint32_t ubuf = frame[4];
+            void *buf = (void *)ubuf;
             uint32_t len = frame[5];
+
+            if (caller_is_user &&
+                uaccess_check(caller_dir, ubuf, len, 1) != 0) {
+                frame[7] = 0xFFFFFFFFU;
+                break;
+            }
+
             int n = buf ? net_recv(buf, len) : -1;
             frame[7] = (n >= 0) ? (uint32_t)n : 0xFFFFFFFFU;
             break;
