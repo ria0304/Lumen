@@ -21,7 +21,7 @@ KERNEL_HDRS = $(wildcard kernel/*.h)
 KERNEL_OBJS = $(BUILD)/entry.o $(BUILD)/usermode.o $(BUILD)/isr.o $(BUILD)/gdt_flush.o $(BUILD)/gdt.o $(BUILD)/tss_load.o $(BUILD)/tss.o \
               $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/serial.o $(BUILD)/idt.o $(BUILD)/pic.o $(BUILD)/pit.o $(BUILD)/keyboard.o $(BUILD)/heap.o \
               $(BUILD)/line_editor.o $(BUILD)/shell.o $(BUILD)/task.o $(BUILD)/scheduler.o $(BUILD)/task_demo.o $(BUILD)/paging.o $(BUILD)/frame.o $(BUILD)/ring3.o $(BUILD)/syscall.o \
-              $(BUILD)/ata.o $(BUILD)/rtc.o $(BUILD)/kmem.o $(BUILD)/fs.o $(BUILD)/loader.o $(BUILD)/gui.o $(BUILD)/settings.o $(BUILD)/users.o $(BUILD)/net.o $(BUILD)/pkg.o
+              $(BUILD)/ata.o $(BUILD)/rtc.o $(BUILD)/kmem.o $(BUILD)/fs.o $(BUILD)/loader.o $(BUILD)/gui.o $(BUILD)/settings.o $(BUILD)/users.o $(BUILD)/net.o $(BUILD)/pkg.o $(BUILD)/proc.o $(BUILD)/klog.o $(BUILD)/cron.o $(BUILD)/gfx.o $(BUILD)/nic.o
 
 KERNEL_ELF = $(BUILD)/kernel.elf
 KERNEL_BIN = $(BUILD)/kernel.bin

@@ -1,12 +1,18 @@
 #include "net.h"
 #include "console.h"
+#include "nic.h"
 #define NET_BUF 512
 static uint8_t lb_buf[NET_BUF];
 static uint32_t lb_len = 0;
 static uint32_t lb_ip = 0x7F000001u;
 static uint32_t stat_tx = 0, stat_rx = 0;
 int net_init(void){lb_len=0;stat_tx=stat_rx=0;return 0;}
-int net_ping(uint32_t ip){(void)ip;stat_tx++;stat_rx++;return 0;}
+int net_ping(uint32_t ip){
+    if((ip>>24)==0x7F){stat_tx++;stat_rx++;return 0;}
+    int r=nic_ping_ip(ip);
+    if(r==0){stat_tx++;stat_rx++;}
+    return r;
+}
 int net_send(const void *data,uint32_t len){
     const uint8_t *p=(const uint8_t*)data;
     if(len>NET_BUF)len=NET_BUF;
@@ -21,6 +27,7 @@ int net_recv(void *out,uint32_t max){
 }
 void net_ifconfig(void){
     terminal_write("lo: 127.0.0.1 up loopback\n");
+    nic_dump();
     (void)lb_ip;
 }
 void net_stat(void){

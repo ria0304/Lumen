@@ -73,6 +73,10 @@ kernel drops into its idle loop. See [Current State](#current-state) for the hon
 | Filesystem | Implemented | LumenFS: format/mount/ls/cat/write/rm/mkdir + open/read/write/seek handles |
 | Disk driver | Implemented | ATA PIO/DMA; the boot sector's own CHS read is the only disk I/O in the project |
 | Graphical interface | Implemented (minimal) | Text-mode desktop via `gui` command + GUI self-test |
+| Shell power pack | Implemented | real pipes (`echo hi \| cat \| wc`), `>`/`>>`/`<" redirection, `jobs`/`fg`/`bg`/`&`, `;`, `if exists..then`, `run` scripts, `sleep`, `wc`, interactive `edit` |
+| Virtual FS | Implemented | `cat /proc/meminfo|version|uptime`, `ls /proc|/dev`, `/dev/null|zero` |
+| Networking | Implemented | RTL8139 PCI driver (polling TX/RX), ARP table, IP checksum, ICMP echo; `ping [IP]`, `netstat`, `arp`; loopback fallback |
+| Admin/Linux parity | Implemented | `uname`, `top`, `dmesg` (klog), `kill`, `chmod`, `sudo`, `useradd/login/whoami`, `ifconfig/ping`, `pkg`, `edit`, `files`, /etc/settings persistence |
 | Advanced settings | Implemented | `settings`/`set`/`get`/`hostname`, persistent `/etc/settings` on LumenFS; `poweroff`/`reboot`; `SYS_GETTIME`/`SYS_REBOOT` |
 
 ---

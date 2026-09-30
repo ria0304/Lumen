@@ -21,6 +21,11 @@
 #include "users.h"
 #include "net.h"
 #include "pkg.h"
+#include "proc.h"
+#include "klog.h"
+#include "cron.h"
+#include "gfx.h"
+#include "nic.h"
 #include "serial.h"
 
 extern void kbd_init(void);
@@ -211,6 +216,8 @@ void irq_unhandled_handler(uint32_t irq)
 void timer_handler(void)
 {
     timer_ticks++;
+    cron_tick(timer_ticks);
+    if (gfx_is_active()) { pic_end_of_interrupt(0); return; }
 
     /*
      * Display the low 16 bits of the timer tick count
@@ -391,6 +398,13 @@ void kmain(void)
     report_self_test("NET", net_run_self_test());
     pkg_init();
     report_self_test("PKG", pkg_run_self_test());
+    report_self_test("PROC", proc_run_self_test());
+    klog_put("lumen boot ok");
+    report_self_test("KLOG", klog_run_self_test());
+    report_self_test("CRON", cron_run_self_test());
+    report_self_test("GFX", gfx_run_self_test());
+    nic_init();
+    report_self_test("NIC", nic_run_self_test());
 
     char *buffer = (char *)kmalloc(64);
 

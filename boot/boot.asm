@@ -4,14 +4,14 @@ ORG 0x7C00
 CODE_SEG equ 0x08
 DATA_SEG equ 0x10
 
-BOOT_MAX_SECTORS equ 240
+BOOT_MAX_SECTORS equ 384
 
 %ifndef KERNEL_SECTORS
     KERNEL_SECTORS equ 120
 %endif
 
 %if KERNEL_SECTORS > BOOT_MAX_SECTORS
-    %error "Kernel is larger than BOOT_MAX_SECTORS (240). Raise the limit or shrink the kernel."
+    %error "Kernel is larger than BOOT_MAX_SECTORS (384). Raise the limit or shrink the kernel."
 %endif
 
 start:
