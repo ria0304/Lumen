@@ -2606,19 +2606,29 @@ int fs_plan_layout(uint32_t total_sectors, fs_superblock_t *out)
     while (inode_sectors < min_inode_sectors)
         inode_sectors *= 2;
 
-    out->inode_table_sectors = inode_sectors;
-    out->inode_count = inode_sectors * FS_INODES_PER_SECTOR;
     out->inode_table_lba = out->bitmap_lba + out->bitmap_sectors;
 
+    /*
+     * Grow (never shrink) the inode table so data_start_lba lands
+     * on a whole block boundary. Growing the table instead of
+     * rounding data_start_lba keeps inode_table_lba + sectors ==
+     * data_start_lba exactly, which fs_validate_superblock
+     * requires; rounding data_start_lba alone used to produce
+     * images that format accepted but mount rejected.
+     */
+    {
+        uint32_t align = FS_BLOCK_SECTORS;
+
+        while ((out->inode_table_lba + inode_sectors) % align != 0)
+            inode_sectors++;
+    }
+
+    out->inode_table_sectors = inode_sectors;
+    out->inode_count = inode_sectors * FS_INODES_PER_SECTOR;
+
+    /* Block N really is at data_start_lba + N * FS_BLOCK_SECTORS. */
     out->data_start_lba = out->inode_table_lba + out->inode_table_sectors;
     out->root_inode = 0;
-
-    /* Round data_start_lba up to a whole block so block N really is at
-     * data_start_lba + N * FS_BLOCK_SECTORS. */
-    uint32_t align = FS_BLOCK_SECTORS;
-
-    if (out->data_start_lba % align != 0)
-        out->data_start_lba += align - (out->data_start_lba % align);
 
     if (out->data_start_lba >= total_sectors)
         return FS_ENOSPC;

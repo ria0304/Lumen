@@ -49,19 +49,36 @@ uint16_t ip_checksum(const void *data, uint32_t len){
 }
 
 int arp_lookup(uint32_t ip, uint8_t *mac_out){
-    for(int i=0;i<ARP_N;i++) if(arp[i].used && arp[i].ip==ip){
-        for(int k=0;k<6;k++)mac_out[k]=arp[i].mac[k]; return 0;
+    for(int i=0;i<ARP_N;i++){
+        if(arp[i].used && arp[i].ip==ip){
+            for(int k=0;k<6;k++)
+                mac_out[k]=arp[i].mac[k];
+            return 0;
+        }
     }
     return -1;
 }
 void arp_add(uint32_t ip, const uint8_t *m){
-    for(int i=0;i<ARP_N;i++) if(arp[i].used && arp[i].ip==ip){
-        for(int k=0;k<6;k++)arp[i].mac[k]=m[k]; return;
+    for(int i=0;i<ARP_N;i++){
+        if(arp[i].used && arp[i].ip==ip){
+            for(int k=0;k<6;k++)
+                arp[i].mac[k]=m[k];
+            return;
+        }
     }
-    for(int i=0;i<ARP_N;i++) if(!arp[i].used){
-        arp[i].ip=ip; for(int k=0;k<6;k++)arp[i].mac[k]=m[k]; arp[i].used=1; return;
+    for(int i=0;i<ARP_N;i++){
+        if(!arp[i].used){
+            arp[i].ip=ip;
+            for(int k=0;k<6;k++)
+                arp[i].mac[k]=m[k];
+            arp[i].used=1;
+            return;
+        }
     }
-    arp[0].ip=ip; for(int k=0;k<6;k++)arp[0].mac[k]=m[k]; arp[0].used=1;
+    arp[0].ip=ip;
+    for(int k=0;k<6;k++)
+        arp[0].mac[k]=m[k];
+    arp[0].used=1;
 }
 
 static int low_frames(uint32_t *a, uint32_t *b, uint32_t *c){
@@ -194,12 +211,20 @@ static int arp_request(uint32_t tip, uint8_t *mac_out){
         int n=nic_recv(rx,sizeof(rx),10);
         if(n>=42 && rx[12]==0x08 && rx[13]==0x06 && rx[20]==0x00 && rx[21]==0x02){
             uint32_t sip2=((uint32_t)rx[28]<<24)|((uint32_t)rx[29]<<16)|((uint32_t)rx[30]<<8)|rx[31];
-            if(sip2==tip){ for(int i=0;i<6;i++)mac_out[i]=rx[22+i]; arp_add(tip,mac_out); return 0; }
+            if(sip2==tip){
+                for(int i=0;i<6;i++)
+                    mac_out[i]=rx[22+i];
+                arp_add(tip,mac_out);
+                return 0;
+            }
         }
         /* learn gratuitous ARPs while waiting */
         if(n>=42 && rx[12]==0x08 && rx[13]==0x06){
             uint32_t s2=((uint32_t)rx[28]<<24)|((uint32_t)rx[29]<<16)|((uint32_t)rx[30]<<8)|rx[31];
-            uint8_t m2[6]; for(int i=0;i<6;i++)m2[i]=rx[22+i]; arp_add(s2,m2);
+            uint8_t m2[6];
+            for(int i=0;i<6;i++)
+                m2[i]=rx[22+i];
+            arp_add(s2,m2);
         }
     }
     return -1;

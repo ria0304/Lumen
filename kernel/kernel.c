@@ -27,6 +27,7 @@
 #include "gfx.h"
 #include "nic.h"
 #include "uaccess.h"
+#include "version.h"
 #include "serial.h"
 
 extern void kbd_init(void);
@@ -316,7 +317,7 @@ void kmain(void)
     gdt_init();
     tss_load();
 
-    console_info("Lumer kernel online!");
+    console_info(LUMEN_BANNER);
     console_info("VGA text driver: OK");
     console_info("Protected mode: 32-bit");
 

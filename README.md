@@ -199,7 +199,7 @@ settings --> fs
 
 Lumen uses two disks under QEMU:
 
-- **Floppy image** (`build/lumer.img`, 1.44 MiB): boot sector plus kernel. Rebuilt by `make`.
+- **Floppy image** (`build/lumen.img`, 1.44 MiB): boot sector plus kernel. Rebuilt by `make`.
 - **IDE disk** (`build/disk.img`, 4 MiB): LumenFS v2. Created once and **left alone by rebuilds**, so
   files survive reboots. Run `make disk-reset` to wipe it.
 
@@ -245,10 +245,9 @@ identity exists so the permission checks can be tested.
 - **`pkg` is a stub.** It records names and versions in a 16-entry in-memory table.
 - **Some syscalls are placeholders.** For example `SYS_SOCKET` returns a fixed loopback fd. Treat the
   table as an in-kernel ABI under construction, not a stable interface.
-- **Naming inconsistency: "Lumen" vs "Lumer."** The project is Lumen, but the boot banner
-  (`Lumer kernel online!`), shell prompt (`Lumer>`), `about`/`version` output, `make run` message,
-  and image filename (`build/lumer.img`) still say "Lumer". `uname` reports "Lumen lumenv1 0.3"
-  while `version` says "0.1". Pick one name and one version.
+- **Naming: "Lumen" everywhere.** The boot banner, shell prompt, `about`/`version` output,
+  `make run` message, and image filename (`build/lumen.img`) all use one name and one version
+  string from `kernel/version.h`.
 - **`help` lags the shell.** It lists only a subset of the commands the shell accepts.
 - **`run.sh` is an empty file.** Use `make run`.
 - **`tools/mkfs.c` is referenced but missing.** `fs.c` and `.gitignore` mention a host-side `mkfs`
@@ -278,7 +277,7 @@ sudo apt install build-essential gcc-multilib nasm qemu-system-x86 gdb
 make
 ```
 
-Produces `build/lumer.img` (boot sector + kernel, padded to 1.44 MiB) and, if missing,
+Produces `build/lumen.img` (boot sector + kernel, padded to 1.44 MiB) and, if missing,
 `build/disk.img` (blank 4 MiB LumenFS disk). The build prints the kernel size and the sector count
 it chose, for example `kernel 138416 bytes -> 272 sectors`. `make clean` removes `build/` and
 `build-test/`; `make disk-reset` recreates the data disk.

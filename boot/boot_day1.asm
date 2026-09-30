@@ -17,7 +17,7 @@ halt:
     hlt
     jmp halt
 
-message db "Lumer booting...", 0
+message db "Lumen booting...", 0
 
 times 510-($-$$) db 0
 dw 0xAA55

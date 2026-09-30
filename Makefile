@@ -25,7 +25,7 @@ KERNEL_OBJS = $(BUILD)/entry.o $(BUILD)/usermode.o $(BUILD)/isr.o $(BUILD)/gdt_f
 
 KERNEL_ELF = $(BUILD)/kernel.elf
 KERNEL_BIN = $(BUILD)/kernel.bin
-IMG = $(BUILD)/lumer.img
+IMG = $(BUILD)/lumen.img
 DISK = $(BUILD)/disk.img
 
 .PHONY: all clean run test disk-reset
@@ -97,6 +97,19 @@ disk-reset:
 	$(MAKE) $(DISK)
 
 # ---------------------------------------------------------------------------
+# Host-side LumenFS v2 formatter. Shares kernel/fs_format.h with the
+# kernel so images it writes mount verbatim. Produces tools/mkfs,
+# which is git-ignored (see .gitignore).
+# ---------------------------------------------------------------------------
+MKFS = tools/mkfs
+
+$(MKFS): tools/mkfs.c kernel/fs_format.h
+	cc -O2 -Wall -o $@ tools/mkfs.c
+
+.PHONY: mkfs
+mkfs: $(MKFS)
+
+# ---------------------------------------------------------------------------
 # make test
 #
 # Builds a separate copy of the kernel with -DLUMEN_AUTOEXIT and runs it
@@ -115,11 +128,11 @@ test:
 	@rm -f $(TEST_DISK)
 	@$(MAKE) --no-print-directory BUILD=$(BUILD_TEST) \
 	   CFLAGS="$(CFLAGS) -DLUMEN_AUTOEXIT" \
-	   $(BUILD_TEST)/lumer.img $(TEST_DISK)
+	   $(BUILD_TEST)/lumen.img $(TEST_DISK)
 	@echo "  TEST    booting headless, capturing serial output..."
 	@timeout 60 qemu-system-i386 -display none -serial stdio \
 	    -boot order=c \
-	    -drive file=$(BUILD_TEST)/lumer.img,format=raw,if=ide \
+	    -drive file=$(BUILD_TEST)/lumen.img,format=raw,if=ide \
 	    -device isa-debug-exit \
 	    < /dev/null > $(TEST_LOG) 2>&1; true
 	@grep -E 'SELFTEST' $(TEST_LOG) || true
@@ -132,13 +145,13 @@ test:
 	 fi
 
 clean:
-	rm -rf $(BUILD) $(BUILD_TEST)
+	rm -rf $(BUILD) $(BUILD_TEST) tools/mkfs tools/*.o
 
 # Interactive boot. The floppy carries the boot sector plus kernel;
 # the IDE disk carries LumenFS data and is deliberately the same
 # persistent file across runs, so files survive a reboot.
 run: $(IMG) $(DISK)
-	@echo "  RUN     Lumer (Ctrl-A X in QEMU to quit)"
+	@echo "  RUN     Lumen (Ctrl-A X in QEMU to quit)"
 	qemu-system-i386 -display curses \
 	    -boot order=a \
 	    -drive file=$(IMG),format=raw,if=floppy \

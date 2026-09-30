@@ -1,4 +1,4 @@
-; Simple ELF test program for Lumer OS
+; Simple ELF test program for Lumen OS
 ; This is a minimal 32-bit ELF executable
 
 BITS 32
