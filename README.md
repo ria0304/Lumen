@@ -36,8 +36,11 @@ file I/O through the syscall table and the kernel re-reads what it wrote, two
 Ring 3 programs fault deliberately and must be retired without taking the
 machine down, and `fork()` is checked for real address-space isolation (the
 child overwrites an inherited page; the parent's copy must be untouched),
-and `exec()` replaces a Ring 3 image with a program read from LumenFS whose
-output the kernel then verifies.
+`exec()` replaces a Ring 3 image with a program read from LumenFS whose
+output the kernel then verifies, and a dedicated probe drives the syscall
+dispatcher's error paths -- bad signal numbers, out-of-range descriptors and
+pids, kernel pointers passed as signal handlers, and unimplemented syscall
+numbers.
 
 ---
 

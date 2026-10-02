@@ -28,6 +28,8 @@ extern uint8_t ring3_exec_entry[];
 extern uint32_t ring3_exec_size;
 extern uint8_t ring3_execprog[];
 extern uint32_t ring3_execprog_len;
+extern uint8_t ring3_syscalls_entry[];
+extern uint32_t ring3_syscalls_size;
 
 extern volatile uint32_t timer_ticks;
 
@@ -61,6 +63,21 @@ extern volatile uint32_t timer_ticks;
 #define RES_FORK_PARENTBUF (R3_RES_BASE + 0x58)
 #define RES_FORK_CHILDBUF  (R3_RES_BASE + 0x5C)
 #define RES_EXEC_RC        (R3_RES_BASE + 0x60)
+
+#define RES_SC_UID      (R3_RES_BASE + 0x70)
+#define RES_SC_GID      (R3_RES_BASE + 0x74)
+#define RES_SC_PID      (R3_RES_BASE + 0x78)
+#define RES_SC_PGID     (R3_RES_BASE + 0x7C)
+#define RES_SC_SETSID   (R3_RES_BASE + 0x80)
+#define RES_SC_MASK     (R3_RES_BASE + 0x84)
+#define RES_SC_SIGNAL   (R3_RES_BASE + 0x88)
+#define RES_SC_SIGBAD   (R3_RES_BASE + 0x8C)
+#define RES_SC_SIGRANGE (R3_RES_BASE + 0x90)
+#define RES_SC_DUP2BAD  (R3_RES_BASE + 0x94)
+#define RES_SC_CLOSEBAD (R3_RES_BASE + 0x98)
+#define RES_SC_KILLBAD  (R3_RES_BASE + 0x9C)
+#define RES_SC_UNKNOWN  (R3_RES_BASE + 0xA0)
+#define RES_SC_PID2     (R3_RES_BASE + 0xA4)
 
 #define R3_FAIL_MARK 0xDEADBEEFU
 
@@ -585,6 +602,101 @@ int ring3_exec_run_self_test(void)
 
     fs_delete(prog_path, FS_ROOT);
     fs_delete(out_path, FS_ROOT);
+
+#undef CHECK
+
+    return failures == 0;
+}
+
+/*
+ * Syscall coverage and error-path checks.
+ *
+ * The point is not that each syscall exists, but that the dispatcher
+ * rejects bad arguments: out-of-range signal numbers, file
+ * descriptors and pids, kernel pointers passed as signal handlers, and
+ * syscall numbers it does not implement. A dispatcher that falls
+ * through leaves frame[7] holding the syscall number, so a user task
+ * sees a garbage "success" from every call it does not recognise.
+ */
+int ring3_syscalls_run_self_test(void)
+{
+    int failures = 0;
+
+#define CHECK(cond, msg)                                                   \
+    do {                                                                   \
+        if (!(cond)) {                                                     \
+            console_error("RING3 self-test: " msg);                         \
+            failures++;                                                    \
+        }                                                                  \
+    } while (0)
+
+    int id = task_create_user_program(ring3_syscalls_entry,
+                                      ring3_syscalls_size);
+
+    if (id < 0) {
+        console_error("RING3 self-test: could not create the syscall probe");
+        return 0;
+    }
+
+    const task_t *probe = task_get((uint32_t)id);
+    uint32_t dir = probe != 0 ? probe->page_directory : 0;
+    uint32_t start = timer_ticks;
+
+    for (;;) {
+        const task_t *t = task_get((uint32_t)id);
+
+        if (t == 0 || t->state == TASK_TERMINATED)
+            break;
+
+        if (timer_ticks - start > 2000) {
+            console_error("RING3 self-test: the syscall probe never "
+                          "finished");
+            break;
+        }
+
+        __asm__ volatile ("hlt");
+    }
+
+    const task_t *done = task_get((uint32_t)id);
+
+    CHECK(done != 0 && done->state == TASK_TERMINATED,
+          "the syscall probe did not terminate");
+
+    uint32_t pid = r3_read(dir, RES_SC_PID);
+
+    /* Identity and credentials. */
+    CHECK(r3_read(dir, RES_SC_UID) == 0, "getuid did not report 0");
+    CHECK(r3_read(dir, RES_SC_GID) == 0, "getgid did not report 0");
+    CHECK((int32_t)pid >= 1, "getpid looks wrong");
+    CHECK(r3_read(dir, RES_SC_PGID) == pid, "getpgid != pid");
+    CHECK(r3_read(dir, RES_SC_SETSID) == pid, "setsid did not return the pid");
+
+    /* Signals. */
+    CHECK(r3_read(dir, RES_SC_MASK) == 0, "sigprocmask failed");
+    CHECK(r3_read(dir, RES_SC_SIGNAL) == 0,
+          "signal with a user handler was refused");
+    CHECK((int32_t)r3_read(dir, RES_SC_SIGBAD) == -1,
+          "signal accepted a kernel pointer as a handler");
+    CHECK((int32_t)r3_read(dir, RES_SC_SIGRANGE) == -1,
+          "signal accepted an out-of-range signal number");
+
+    /* Descriptor and pid validation. */
+    CHECK((int32_t)r3_read(dir, RES_SC_DUP2BAD) == -1,
+          "dup2 accepted an out-of-range descriptor");
+    CHECK((int32_t)r3_read(dir, RES_SC_CLOSEBAD) == -1,
+          "close accepted an out-of-range descriptor");
+    CHECK((int32_t)r3_read(dir, RES_SC_KILLBAD) == -1,
+          "kill accepted an out-of-range pid");
+
+    /* An unimplemented syscall must fail rather than look successful. */
+    CHECK((int32_t)r3_read(dir, RES_SC_UNKNOWN) == -1,
+          "an unknown syscall did not fail");
+
+    /* And the task must still work after all of that. */
+    CHECK(r3_read(dir, RES_SC_PID2) == pid,
+          "the task was disturbed by the failed syscalls");
+
+    task_wait((uint32_t)id);
 
 #undef CHECK
 

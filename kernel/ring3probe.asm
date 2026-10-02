@@ -28,6 +28,8 @@ global ring3_exec_entry
 global ring3_execprog
 global ring3_exec_size
 global ring3_execprog_len
+global ring3_syscalls_entry
+global ring3_syscalls_size
 
 ; User addresses. These sit at the very bottom of the stack page
 ; (0x01001000), well below where the stack pointer starts
@@ -420,3 +422,96 @@ align 4
 global ring3_exec_size
 ring3_exec_size:
     dd ring3_exec_entry_end - ring3_exec_entry
+
+; ---- syscall coverage ------------------------------------------------
+;
+; Exercises the syscalls no other probe touches, and -- just as
+; importantly -- the error paths, which is where a dispatcher usually
+; goes wrong. Every result is recorded for the kernel to check.
+
+RES_SC_UID      equ RES_BASE + 0x70
+RES_SC_GID      equ RES_BASE + 0x74
+RES_SC_PID      equ RES_BASE + 0x78
+RES_SC_PGID     equ RES_BASE + 0x7C
+RES_SC_SETSID   equ RES_BASE + 0x80
+RES_SC_MASK     equ RES_BASE + 0x84
+RES_SC_SIGNAL   equ RES_BASE + 0x88
+RES_SC_SIGBAD   equ RES_BASE + 0x8C
+RES_SC_SIGRANGE equ RES_BASE + 0x90
+RES_SC_DUP2BAD  equ RES_BASE + 0x94
+RES_SC_CLOSEBAD equ RES_BASE + 0x98
+RES_SC_KILLBAD  equ RES_BASE + 0x9C
+RES_SC_UNKNOWN  equ RES_BASE + 0xA0
+RES_SC_PID2     equ RES_BASE + 0xA4
+
+SYS_GETUID   equ 8
+SYS_GETGID   equ 9
+SYS_SETSID   equ 10
+SYS_GETPGID  equ 11
+SYS_KILL     equ 12
+SYS_SIGNAL   equ 13
+SYS_SIGMASK  equ 14
+SYS_PIPE     equ 15
+SYS_DUP2     equ 16
+SYS_CLOSE    equ 17
+
+ring3_syscalls_entry:
+    call_sys SYS_GETUID, 0, 0, 0
+    store_res RES_SC_UID
+
+    call_sys SYS_GETGID, 0, 0, 0
+    store_res RES_SC_GID
+
+    call_sys SYS_GETPID, 0, 0, 0
+    store_res RES_SC_PID
+
+    call_sys SYS_GETPGID, 0, 0, 0
+    store_res RES_SC_PGID
+
+    call_sys SYS_SETSID, 0, 0, 0
+    store_res RES_SC_SETSID
+
+    call_sys SYS_SIGMASK, 1, 2, 0            ; SIG_BLOCK, mask bit 1
+    store_res RES_SC_MASK
+
+    ; A handler address inside our own user pages is accepted.
+    call_sys SYS_SIGNAL, 1, EXEC_BUF, 0
+    store_res RES_SC_SIGNAL
+
+    ; A kernel address is not.
+    call_sys SYS_SIGNAL, 1, 0x00100000, 0
+    store_res RES_SC_SIGBAD
+
+    ; Signal number out of range.
+    call_sys SYS_SIGNAL, 99, EXEC_BUF, 0
+    store_res RES_SC_SIGRANGE
+
+    call_sys SYS_DUP2, 999, 0, 0
+    store_res RES_SC_DUP2BAD
+
+    call_sys SYS_CLOSE, 999, 0, 0
+    store_res RES_SC_CLOSEBAD
+
+    call_sys SYS_KILL, 999, 1, 0
+    store_res RES_SC_KILLBAD
+
+    ; A number the dispatcher does not know.
+    call_sys 99, 0, 0, 0
+    store_res RES_SC_UNKNOWN
+
+    ; The task should still be perfectly usable afterwards.
+    call_sys SYS_GETPID, 0, 0, 0
+    store_res RES_SC_PID2
+
+    call_sys SYS_EXIT, 0, 0, 0
+    jmp .hang
+.hang:
+    jmp .hang
+
+ring3_syscalls_entry_end:
+
+section .data
+align 4
+global ring3_syscalls_size
+ring3_syscalls_size:
+    dd ring3_syscalls_entry_end - ring3_syscalls_entry

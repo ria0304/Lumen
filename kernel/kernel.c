@@ -416,12 +416,14 @@ void kmain(void)
         report_self_test("RING3FLT", ring3_fault_run_self_test());
         report_self_test("RING3FRK", ring3_fork_run_self_test());
         report_self_test("RING3EXE", ring3_exec_run_self_test());
+        report_self_test("RING3SYC", ring3_syscalls_run_self_test());
     } else {
         terminal_write("SELFTEST FS SKIP (unformatted)\n");
         terminal_write("SELFTEST RING3IO SKIP (unformatted)\n");
         terminal_write("SELFTEST RING3FLT SKIP (unformatted)\n");
         terminal_write("SELFTEST RING3FRK SKIP (unformatted)\n");
         terminal_write("SELFTEST RING3EXE SKIP (unformatted)\n");
+        terminal_write("SELFTEST RING3SYC SKIP (unformatted)\n");
         console_warn("FS: run 'format' to initialize the disk");
     }
 

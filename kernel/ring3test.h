@@ -26,4 +26,7 @@ int ring3_fork_run_self_test(void);
 /* exec(): replace a Ring 3 image from LumenFS and run the result. */
 int ring3_exec_run_self_test(void);
 
+/* Syscall coverage, especially the dispatcher error paths. */
+int ring3_syscalls_run_self_test(void);
+
 #endif
