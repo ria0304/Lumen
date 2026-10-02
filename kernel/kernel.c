@@ -413,9 +413,11 @@ void kmain(void)
          * and LumenFS together.
          */
         report_self_test("RING3IO", ring3_io_run_self_test());
+        report_self_test("RING3FLT", ring3_fault_run_self_test());
     } else {
         terminal_write("SELFTEST FS SKIP (unformatted)\n");
         terminal_write("SELFTEST RING3IO SKIP (unformatted)\n");
+        terminal_write("SELFTEST RING3FLT SKIP (unformatted)\n");
         console_warn("FS: run 'format' to initialize the disk");
     }
 

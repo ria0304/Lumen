@@ -13,8 +13,15 @@
 
 BITS 32
 
+; The Ring 3 code page is mapped read-only; see ring3.h.
+TASK_RING3_CODE_VA equ 0x01000000
+
 global ring3_io_entry
 global ring3_io_size
+global ring3_fault_entry
+global ring3_badop_entry
+global ring3_fault_size
+global ring3_badop_size
 
 ; User addresses. These sit at the very bottom of the stack page
 ; (0x01001000), well below where the stack pointer starts
@@ -168,6 +175,36 @@ ring3_io_entry:
 
 ring3_io_entry_end:
 
+; ---- Fault probes -----------------------------------------------------
+;
+; Both of these deliberately fault. A fault taken in Ring 3 belongs to
+; the offending program: the kernel must retire just that task and keep
+; running. If either one halted the machine, every self-test after it
+; would stop being reported -- which is exactly what the harness checks.
+
+; Read from an unmapped user address: page fault (vector 14).
+ring3_fault_entry:
+    mov eax, 0x40000000        ; unmapped, well inside the user window
+    mov ebx, [eax]             ; faults here
+    mov dword [RES_BASE], ebx  ; only reached if nothing faulted
+    jmp ring3_fault_entry
+
+ring3_fault_entry_end:
+
+; Execute an undefined instruction: invalid opcode (vector 6). The
+; first probe already covers #PF, and #PF alone would not show that the
+; recoverable-vector list is wired up beyond a single entry.
+;
+; (Writing to the read-only code page was the obvious second case, but
+; paging -- not segment protection -- is what enforces it here, so it
+; raised a second #PF rather than #GP.)
+ring3_badop_entry:
+    ud2                                     ; faults here
+    jmp ring3_badop_entry
+
+ring3_badop_entry_end:
+
+
 ; The kernel passes ring3_io_size as the code size, which is exactly
 ; the number of bytes to copy into the Ring 3 page. It has to live in
 ; a section with real storage: as an `equ` it is an absolute symbol
@@ -178,3 +215,13 @@ align 4
 global ring3_io_size
 ring3_io_size:
     dd ring3_io_entry_end - ring3_io_entry
+
+align 4
+global ring3_fault_size
+ring3_fault_size:
+    dd ring3_fault_entry_end - ring3_fault_entry
+
+align 4
+global ring3_badop_size
+ring3_badop_size:
+    dd ring3_badop_entry_end - ring3_badop_entry

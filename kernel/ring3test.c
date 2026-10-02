@@ -18,6 +18,10 @@
  */
 extern uint8_t ring3_io_entry[];
 extern uint32_t ring3_io_size;
+extern uint8_t ring3_fault_entry[];
+extern uint32_t ring3_fault_size;
+extern uint8_t ring3_badop_entry[];
+extern uint32_t ring3_badop_size;
 
 extern volatile uint32_t timer_ticks;
 
@@ -186,6 +190,143 @@ int ring3_io_run_self_test(void)
     task_wait((uint32_t)id);
 
     fs_delete(R3_FILE, FS_ROOT);
+
+#undef CHECK
+
+    return failures == 0;
+}
+
+/*
+ * Run one program that is expected to fault, and check that the fault
+ * retired it without taking the machine with it.
+ */
+static int ring3_expect_fault(const char *what,
+                              const uint8_t *code,
+                              uint32_t size)
+{
+    int id = task_create_user_program(code, size);
+
+    if (id < 0) {
+        console_error("RING3 self-test: could not create the ");
+        terminal_write(what);
+        console_error(" probe");
+        return 0;
+    }
+
+    uint32_t start = timer_ticks;
+
+    for (;;) {
+        const task_t *t = task_get((uint32_t)id);
+
+        if (t == 0 || t->state == TASK_TERMINATED)
+            break;
+
+        if (timer_ticks - start > 2000) {
+            console_error("RING3 self-test: ");
+            terminal_write(what);
+            console_error(" probe never faulted");
+            task_terminate((uint32_t)id);
+            task_wait((uint32_t)id);
+            return 0;
+        }
+
+        __asm__ volatile ("hlt");
+    }
+
+    const task_t *done = task_get((uint32_t)id);
+
+    if (done == 0 || done->state != TASK_TERMINATED) {
+        console_error("RING3 self-test: ");
+        terminal_write(what);
+        console_error(" probe was not retired by its fault");
+        task_wait((uint32_t)id);
+        return 0;
+    }
+
+    task_wait((uint32_t)id);
+
+    return 1;
+}
+
+/*
+ * Fault isolation. Two programs that fault for different reasons must
+ * each be retired on their own, and the machine must still be healthy
+ * afterwards -- proven by running a well-behaved Ring 3 task after
+ * them and requiring it to complete.
+ */
+int ring3_fault_run_self_test(void)
+{
+    int failures = 0;
+
+#define CHECK(cond, msg)                                                   \
+    do {                                                                   \
+        if (!(cond)) {                                                     \
+            console_error("RING3 self-test: " msg);                         \
+            failures++;                                                    \
+        }                                                                  \
+    } while (0)
+
+    if (!fs_is_mounted()) {
+        console_warn("RING3 self-test: no filesystem, skipping fault checks");
+        return 1;
+    }
+
+    CHECK(ring3_expect_fault("page-fault", ring3_fault_entry,
+                             ring3_fault_size),
+          "an unmapped Ring 3 read was not isolated");
+
+    CHECK(ring3_expect_fault("invalid-opcode", ring3_badop_entry,
+                             ring3_badop_size),
+          "an invalid opcode in Ring 3 was not isolated");
+
+    /*
+     * The machine must still work. Running the full I/O probe again
+     * after the faults is the real assertion: it exercises paging, the
+     * scheduler and the filesystem once more, so a corrupted frame
+     * table or a wedged scheduler shows up here.
+     */
+    {
+        fs_mkdir(R3_DIR, FS_ROOT, FS_MODE_DIR_DEFAULT);
+        fs_delete(R3_FILE, FS_ROOT);
+
+        int id = task_create_user_program(ring3_io_entry, ring3_io_size);
+
+        CHECK(id >= 0, "a healthy Ring 3 task would not start after the faults");
+
+        if (id >= 0) {
+            const task_t *probe = task_get((uint32_t)id);
+            uint32_t dir = probe != 0 ? probe->page_directory : 0;
+            uint32_t start = timer_ticks;
+
+            for (;;) {
+                const task_t *t = task_get((uint32_t)id);
+
+                if (t == 0 || t->state == TASK_TERMINATED)
+                    break;
+
+                if (timer_ticks - start > 2000)
+                    break;
+
+                __asm__ volatile ("hlt");
+            }
+
+            const task_t *done = task_get((uint32_t)id);
+
+            CHECK(done != 0 && done->state == TASK_TERMINATED,
+                  "the post-fault task did not finish");
+
+            if (dir != 0) {
+                CHECK(r3_read(dir, RES_WRITE) == 8,
+                      "the post-fault task could not write");
+                CHECK(r3_read(dir, RES_CMP) == 1,
+                      "the post-fault task read back wrong bytes");
+            }
+
+            task_wait((uint32_t)id);
+        }
+
+        fs_delete(R3_FILE, FS_ROOT);
+    }
 
 #undef CHECK
 

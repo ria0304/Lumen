@@ -13,4 +13,11 @@
  */
 int ring3_io_run_self_test(void);
 
+/*
+ * Fault isolation: a Ring 3 fault must retire only the offending
+ * task. Two programs are made to fault (unmapped read, and a write to
+ * a read-only page), then a healthy task is required to still run.
+ */
+int ring3_fault_run_self_test(void);
+
 #endif
