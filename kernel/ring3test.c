@@ -54,6 +54,8 @@ extern volatile uint32_t timer_ticks;
 #define RES_FORK_WAIT (R3_RES_BASE + 0x50)
 #define RES_FORK_DONE (R3_RES_BASE + 0x54)
 #define FORK_DONE_MAGIC 0x00C0FFEEU
+#define RES_FORK_PARENTBUF (R3_RES_BASE + 0x58)
+#define RES_FORK_CHILDBUF  (R3_RES_BASE + 0x5C)
 
 #define R3_FAIL_MARK 0xDEADBEEFU
 
@@ -244,6 +246,7 @@ int ring3_fork_run_self_test(void)
     uint32_t child_pid = 0;
     uint32_t child_fork_return = 0xDEADBEEFU;
     uint32_t child_ppid = 0xDEADBEEFU;
+    uint32_t child_buf = 0xDEADBEEFU;
     int child_seen = 0;
     uint32_t start = timer_ticks;
 
@@ -265,9 +268,13 @@ int ring3_fork_run_self_test(void)
                     child_fork_return =
                         r3_read(c->page_directory, RES_FORK_CHILD);
                     child_ppid = r3_read(c->page_directory, RES_FORK_PPID);
+                    child_buf =
+                        r3_read(c->page_directory, RES_FORK_CHILDBUF);
 
                     CHECK((int32_t)child_ppid == (int32_t)parent_pid,
                           "the child's parent id is wrong");
+                    CHECK(child_buf == 0xBBBBBBBBU,
+                          "the child did not see its own write");
 
                     child_seen = 1;
                     break;
@@ -323,6 +330,13 @@ int ring3_fork_run_self_test(void)
 
     CHECK((int32_t)r3_read(dir, RES_FORK_WAIT) == (int32_t)child_pid,
           "wait did not return the child id");
+
+    /*
+     * The decisive check: the child overwrote a page both tasks
+     * inherited, and the parent's copy must be exactly as it left it.
+     */
+    CHECK(r3_read(dir, RES_FORK_PARENTBUF) == 0xAAAAAAAAU,
+          "the child's writes reached the parent's memory");
 
     if ((int32_t)child_pid > 0)
         task_wait(child_pid);

@@ -239,6 +239,13 @@ RES_FORK_PPID  equ RES_BASE + 0x48    ; child: parent's pid, expect > 0
 RES_FORK_PPID2 equ RES_BASE + 0x4C    ; parent: its own parent id
 RES_FORK_WAIT  equ RES_BASE + 0x50    ; parent: SYS_WAIT result, expect > 0
 RES_FORK_DONE  equ RES_BASE + 0x54    ; child: written last, "results ready"
+RES_FORK_PARENTBUF equ RES_BASE + 0x58 ; parent: its own buffer after the child ran
+RES_FORK_CHILDBUF  equ RES_BASE + 0x5C ; child: the same address, seen privately
+
+; A user page both tasks can reach, seeded before the fork.
+BUF_ADDR   equ 0x01001080
+PARENT_PAT equ 0xAAAAAAAA
+CHILD_PAT  equ 0xBBBBBBBB
 
 FORK_DONE_MAGIC equ 0x00C0FFEE
 
@@ -247,6 +254,11 @@ SYS_FORK      equ 5
 SYS_WAIT      equ 4
 
 ring3_fork_entry:
+    ; Seed a byte pattern before forking. The child will scribble over
+    ; this page; if the two tasks really have private address spaces,
+    ; the parent's copy must be untouched afterwards.
+    mov dword [BUF_ADDR], PARENT_PAT
+
     call_sys SYS_FORK, 0, 0, 0
     store_res RES_FORK_PID              ; parent: child id; child: 0
 
@@ -285,12 +297,22 @@ ring3_fork_entry:
 .wait_ok:
     store_res RES_FORK_WAIT
 
+    ; The child's writes must not have reached this page.
+    mov eax, [BUF_ADDR]
+    mov dword [RES_FORK_PARENTBUF], eax
+
     call_sys SYS_EXIT, 0, 0, 0
     jmp .hang
 
 .child:
     ; EAX came back 0, which is exactly what fork() owes the child.
     store_res RES_FORK_CHILD
+
+    ; Overwrite the inherited page, then read it back: a real fork must
+    ; show our own write and not the parent's value.
+    mov dword [BUF_ADDR], CHILD_PAT
+    mov eax, [BUF_ADDR]
+    mov dword [RES_FORK_CHILDBUF], eax
 
     call_sys SYS_GETPPID, 0, 0, 0
     store_res RES_FORK_PPID
