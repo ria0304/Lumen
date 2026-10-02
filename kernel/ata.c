@@ -1,5 +1,14 @@
 #include <stdint.h>
 #include <stddef.h>
+
+/*
+ * Set to 1 to enable the (currently misbehaving) DMA transfer path.
+ * See the ata_init() comment for why this defaults to 0.
+ */
+#ifndef LUMEN_ATA_USE_DMA
+#define LUMEN_ATA_USE_DMA 0
+#endif
+
 #include "ata.h"
 #include "console.h"
 #include "frame.h"
@@ -311,6 +320,75 @@ static void print_hex32(uint32_t value)
     }
 }
 
+static uint32_t pci_cfg_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t off)
+{
+    uint32_t address = 0x80000000u
+                     | ((uint32_t)bus << 16)
+                     | ((uint32_t)(slot & 0x1F) << 11)
+                     | ((uint32_t)(func & 0x07) << 8)
+                     | (off & 0xFC);
+
+    outl(0xCF8, address);
+    return inl(0xCFC);
+}
+
+static void pci_cfg_write32(uint8_t bus, uint8_t slot, uint8_t func,
+                            uint8_t off, uint32_t value)
+{
+    uint32_t address = 0x80000000u
+                     | ((uint32_t)bus << 16)
+                     | ((uint32_t)(slot & 0x1F) << 11)
+                     | ((uint32_t)(func & 0x07) << 8)
+                     | (off & 0xFC);
+
+    outl(0xCF8, address);
+    outl(0xCFC, value);
+}
+
+/*
+ * Turn on Bus Mastering for the IDE controller.
+ *
+ * Without bit 2 of the PCI command register set, the controller
+ * never takes ownership of the bus: no interrupt is ever raised and
+ * no sector is moved. Locate the IDE function by its PCI class code
+ * (0x0101) rather than hardcoding PIIX slot/function, which differ
+ * between QEMU machine types.
+ */
+static void ide_enable_bus_master(void)
+{
+    for (uint8_t slot = 0; slot < 32; slot++) {
+        for (uint8_t func = 0; func < 8; func++) {
+
+            uint32_t id = pci_cfg_read32(0, slot, func, 0x00);
+
+            if (id == 0xFFFFFFFFu)
+                continue;               /* no device here */
+
+            /* dword at 0x08: revision [7:0], prog-if [15:8],
+             * subclass [23:16], class [31:24] */
+            uint32_t class_reg = pci_cfg_read32(0, slot, func, 0x08);
+            uint32_t class_code = (class_reg >> 24) & 0xFF;
+            uint32_t subclass = (class_reg >> 16) & 0xFF;
+
+            if (class_code != 0x01 || subclass != 0x01)
+                continue;
+
+            uint32_t command = pci_cfg_read32(0, slot, func, 0x04);
+
+            if (command & 0x04)
+                return;                 /* already enabled */
+
+            pci_cfg_write32(0, slot, func, 0x04, command | 0x04);
+
+            console_info("DMA: bus master enabled on IDE");
+            terminal_putchar('\n');
+            return;
+        }
+    }
+
+    console_warn("DMA: no IDE PCI function found for bus mastering");
+}
+
 /* DMA PRDT entry: 8 bytes (physical address + byte count + EOT flag) */
 static int dma_init(void)
 {
@@ -329,6 +407,8 @@ static int dma_init(void)
     console_info("DMA: PRDT allocated at 0x");
     print_hex32(dma_prdt_phys);
     terminal_putchar('\n');
+
+    ide_enable_bus_master();
 
     return 0;
 }
@@ -376,13 +456,25 @@ void ata_init(void)
     dma_prdt_phys = 0;
     dma_prdt = 0;
 
-    /* Initialize DMA if possible */
+    /* Initialize DMA if possible.
+     *
+     * Off by default. The DMA path completes without reporting an
+     * error under QEMU but leaves the destination buffer holding the
+     * wrong bytes, so every filesystem read came back wrong while the
+     * call claimed success. Until that is root-caused, PIO is the
+     * correct choice: it is slower but it is right. Build with
+     * -DLUMEN_ATA_USE_DMA=1 to opt back in.
+     */
+#if LUMEN_ATA_USE_DMA
     if (dma_init() == 0) {
         dma_supported = 1;
         console_info("ATA: DMA support enabled");
     } else {
         console_warn("ATA: DMA not available, using PIO");
     }
+#else
+    console_info("ATA: using PIO (DMA disabled)");
+#endif
 
     /* ---- Primary Master (0x1F0) ---- */
     outb(ATA_DRIVE_HEAD, 0xE0);
@@ -613,22 +705,34 @@ static int ata_dma_read(uint32_t lba, uint8_t count, void *buffer)
     /* Start DMA transfer */
     outb(ATA_BM_COMMAND, ATA_BM_CMD_START);
 
-    /* Wait for completion */
+    /* Wait for completion. A spin timeout means the transfer never
+     * happened -- report failure so the caller falls back to PIO.
+     * Returning success here used to leave 'buffer' untouched while
+     * claiming the read worked, which silently handed the filesystem
+     * a sector full of garbage. */
+    int completed = 0;
+
     for (uint32_t spins = 0; spins < 1000000U; spins++) {
         uint8_t status = inb(ATA_BM_STATUS);
         if (status & ATA_BM_STATUS_INTR) {
-            /* DMA completed */
+            completed = 1;
             break;
         }
         if (status & ATA_BM_STATUS_ERR) {
             console_error("DMA: transfer error");
-            outb(ATA_BM_COMMAND, 0);  /* Stop DMA */
-            return -1;
+            break;
         }
     }
 
     /* Stop DMA */
     outb(ATA_BM_COMMAND, 0);
+
+    if (!completed) {
+        /* Clear the pending error/interrupt so the drive is left in a
+         * state where the PIO fallback can drive it again. */
+        outb(ATA_BM_STATUS, ATA_BM_STATUS_INTR | ATA_BM_STATUS_ERR);
+        return -1;
+    }
 
     /* Wait for drive to be ready */
     if (ata_wait_not_busy() != 0)
@@ -663,21 +767,30 @@ static int ata_dma_write(uint32_t lba, uint8_t count, const void *buffer)
     /* Start DMA transfer */
     outb(ATA_BM_COMMAND, ATA_BM_CMD_START | ATA_BM_CMD_WRITE);
 
-    /* Wait for completion */
+    /* Wait for completion. As with reads, a spin timeout is a
+     * failure -- reporting success would leave the caller believing
+     * data reached the platter when nothing was written. */
+    int completed = 0;
+
     for (uint32_t spins = 0; spins < 1000000U; spins++) {
         uint8_t status = inb(ATA_BM_STATUS);
         if (status & ATA_BM_STATUS_INTR) {
+            completed = 1;
             break;
         }
         if (status & ATA_BM_STATUS_ERR) {
             console_error("DMA: transfer error");
-            outb(ATA_BM_COMMAND, 0);
-            return -1;
+            break;
         }
     }
 
     /* Stop DMA */
     outb(ATA_BM_COMMAND, 0);
+
+    if (!completed) {
+        outb(ATA_BM_STATUS, ATA_BM_STATUS_INTR | ATA_BM_STATUS_ERR);
+        return -1;
+    }
 
     /* Wait for drive to be ready */
     if (ata_wait_not_busy() != 0)

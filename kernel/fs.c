@@ -2939,8 +2939,10 @@ void fs_init(void)
  *   - permission enforcement for a non-owner
  *   - persistence across a remount
  *
- * Returns 0 on success, non-zero on failure, per the *_run_self_test
- * convention.
+ * Returns non-zero on success, 0 on failure, per the
+ * *_run_self_test convention that report_self_test() consumes. This
+ * used to return 0 on success, which made every filesystem failure
+ * print "SELFTEST FS PASS".
  */
 int fs_self_test(void)
 {
@@ -3335,5 +3337,5 @@ int fs_self_test(void)
     }
 
     console_info("FS self-test: PASS");
-    return 0;
+    return 1;
 }
