@@ -23,4 +23,7 @@ int ring3_fault_run_self_test(void);
 /* fork() from Ring 3: clone, child return value, parent/child link. */
 int ring3_fork_run_self_test(void);
 
+/* exec(): replace a Ring 3 image from LumenFS and run the result. */
+int ring3_exec_run_self_test(void);
+
 #endif

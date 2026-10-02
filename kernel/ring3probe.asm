@@ -24,6 +24,10 @@ global ring3_fault_size
 global ring3_badop_size
 global ring3_fork_entry
 global ring3_fork_size
+global ring3_exec_entry
+global ring3_execprog
+global ring3_exec_size
+global ring3_execprog_len
 
 ; User addresses. These sit at the very bottom of the stack page
 ; (0x01001000), well below where the stack pointer starts
@@ -241,6 +245,8 @@ RES_FORK_WAIT  equ RES_BASE + 0x50    ; parent: SYS_WAIT result, expect > 0
 RES_FORK_DONE  equ RES_BASE + 0x54    ; child: written last, "results ready"
 RES_FORK_PARENTBUF equ RES_BASE + 0x58 ; parent: its own buffer after the child ran
 RES_FORK_CHILDBUF  equ RES_BASE + 0x5C ; child: the same address, seen privately
+RES_EXEC_RC equ RES_BASE + 0x60    ; launcher: result of SYS_EXEC
+RES_FORK_CHILDBUF  equ RES_BASE + 0x5C ; child: the same address, seen privately
 
 ; A user page both tasks can reach, seeded before the fork.
 BUF_ADDR   equ 0x01001080
@@ -250,6 +256,7 @@ CHILD_PAT  equ 0xBBBBBBBB
 FORK_DONE_MAGIC equ 0x00C0FFEE
 
 SYS_GETPPID   equ 7
+SYS_EXEC       equ 6
 SYS_FORK      equ 5
 SYS_WAIT      equ 4
 
@@ -340,3 +347,76 @@ align 4
 global ring3_fork_size
 ring3_fork_size:
     dd ring3_fork_entry_end - ring3_fork_entry
+
+; ---- exec test -------------------------------------------------------
+
+section .text
+
+;
+; Two pieces. ring3_exec_entry is the launcher: it execs a program
+; from the filesystem, which replaces its own image. ring3_execprog
+; is the program it loads -- it builds its strings on the stack,
+; because the code page is mapped read-only -- and writes a file the
+; kernel can check afterwards. That makes the test end to end: exec,
+; the replacement image, and file I/O from a freshly loaded task.
+
+EXEC_PATH   equ 0x01001000
+EXEC_BUF    equ 0x01001100
+EXEC_FLAGS  equ 0x0E          ; O_RDWR | O_CREAT | O_TRUNC
+
+ring3_exec_entry:
+    ; Build "/tmp/prog.bin" on the stack page and exec it.
+    mov dword [EXEC_PATH],     0x706D742F     ; "/tmp"
+    mov dword [EXEC_PATH + 4], 0x6F72702F     ; "/pro"
+    mov dword [EXEC_PATH + 8], 0x69622E67     ; "g.bi"
+    mov dword [EXEC_PATH + 12], 0x0000006E    ; "n\0"
+
+    call_sys SYS_EXEC, EXEC_PATH, 0, 0
+    store_res RES_EXEC_RC
+
+    call_sys SYS_EXIT, 0, 0, 0
+    jmp .hang
+.hang:
+    jmp .hang
+
+ring3_exec_entry_end:
+
+; The program that gets exec'd. Loaded at TASK_RING3_CODE_VA, so it
+; must not assume anything about registers on entry and must place
+; everything writable on its own stack page.
+ring3_execprog:
+    ; "/tmp/prog.out"
+    mov dword [EXEC_PATH],     0x706D742F     ; "/tmp"
+    mov dword [EXEC_PATH + 4], 0x6F72702F     ; "/pro"
+    mov dword [EXEC_PATH + 8], 0x756F2E67     ; "g.ou"
+    mov dword [EXEC_PATH + 12], 0x00000074    ; "t\0"
+
+    ; "EXEC_OK"
+    mov dword [EXEC_BUF],     0x43455845      ; "EXEC"
+    mov dword [EXEC_BUF + 4], 0x004B4F5F      ; "_OK\0"
+
+    call_sys SYS_OPEN, EXEC_PATH, EXEC_FLAGS, 0
+    test eax, eax
+    js .bad
+
+    mov esi, eax
+    call_sys SYS_WRITE, esi, EXEC_BUF, 7
+    call_sys SYS_CLOSE, esi, 0, 0
+    call_sys SYS_EXIT, 0, 0, 0
+
+.bad:
+    call_sys SYS_EXIT, 1, 0, 0
+    jmp .bad
+
+ring3_execprog_end:
+
+section .data
+align 4
+global ring3_execprog_len
+ring3_execprog_len:
+    dd ring3_execprog_end - ring3_execprog
+
+align 4
+global ring3_exec_size
+ring3_exec_size:
+    dd ring3_exec_entry_end - ring3_exec_entry

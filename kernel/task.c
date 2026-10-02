@@ -1073,13 +1073,31 @@ int task_fork(void)
     return child_id;
 }
 
-int sys_exec(const char *filename)
+/*
+ * exec() for a Ring 3 task: replace this task's image with the
+ * contents of a file on LumenFS and continue at Ring 3 in it.
+ *
+ * The new image is entered by rewriting the live syscall frame so the
+ * stub's popa/iret lands in it. The previous version built a fresh
+ * user stack into task->switch_esp instead, but the very next context
+ * save overwrote switch_esp with the still-current syscall frame --
+ * so the task carried on executing the old program and the exec'd one
+ * never ran.
+ *
+ * The outgoing address space is not torn down here: the CPU is still
+ * running from it until the frame is popped. It is recorded for
+ * task_wait() to release, the same way a normal exit defers.
+ *
+ * Returns 1 on success, 0 on failure.
+ */
+int sys_exec(const char *filename, uint32_t *frame)
 {
-    if (filename == 0)
+    if (filename == 0 || frame == 0)
         return 0;
 
     uint32_t id = scheduler_current_task();
     task_t *task = (task_t *)task_get(id);
+
     if (task == 0)
         return 0;
 
@@ -1087,22 +1105,28 @@ int sys_exec(const char *filename)
         return 0;
 
     fs_handle_t *fd = kmalloc(sizeof(fs_handle_t));
+
     if (fd == 0)
         return 0;
 
-    if (fs_open(filename, FS_ROOT, 0, fd) != 0) {
+    /* flags == 0 is a read-only open. */
+    if (fs_open(filename, FS_ROOT, 0, fd) != FS_OK) {
         kfree(fd);
         return 0;
     }
 
     uint32_t file_size = 0;
-    if (fs_handle_size(fd, &file_size) != 0 || file_size > PAGE_SIZE) {
+
+    if (fs_handle_size(fd, &file_size) != FS_OK ||
+        file_size == 0 ||
+        file_size > PAGE_SIZE) {
         fs_close(fd);
         kfree(fd);
         return 0;
     }
 
     uint8_t *code = kmalloc(file_size);
+
     if (code == 0) {
         fs_close(fd);
         kfree(fd);
@@ -1110,80 +1134,109 @@ int sys_exec(const char *filename)
     }
 
     uint32_t read = 0;
-    if (fs_handle_read(fd, code, file_size, &read) != 0 || read != file_size) {
+
+    if (fs_handle_read(fd, code, file_size, &read) != FS_OK ||
+        read != file_size) {
         kfree(code);
         fs_close(fd);
         kfree(fd);
         return 0;
     }
+
     fs_close(fd);
     kfree(fd);
 
-    if (task->page_directory != PAGE_DIRECTORY_ADDRESS) {
-        __asm__ volatile ("cli");
-        if (paging_current_directory() == task->page_directory)
-            paging_switch_directory(PAGE_DIRECTORY_ADDRESS);
-        paging_destroy_address_space(task->page_directory);
-        __asm__ volatile ("sti");
-    }
-
     uint32_t directory = paging_create_address_space();
-    if (directory == FRAME_INVALID) {
+
+    if (directory == FRAME_INVALID)
         return 0;
-    }
 
     uint32_t code_phys = frame_alloc();
-    if (code_phys == FRAME_INVALID || code_phys >= PAGING_IDENTITY_LIMIT) {
+
+    if (code_phys == FRAME_INVALID ||
+        code_phys >= PAGING_IDENTITY_LIMIT) {
         if (code_phys != FRAME_INVALID)
             frame_free(code_phys);
-        frame_free(directory);
+
+        paging_destroy_address_space(directory);
         return 0;
     }
 
     uint8_t *code_dst = (uint8_t *)code_phys;
+
     for (uint32_t k = 0; k < PAGE_SIZE; k++)
         code_dst[k] = (k < file_size) ? code[k] : 0;
 
     if (paging_map_in_directory(directory, TASK_RING3_CODE_VA, code_phys,
-            PAGE_PRESENT | PAGE_USER) != 0) {
+                                PAGE_PRESENT | PAGE_USER) != 0) {
         frame_free(code_phys);
-        frame_free(directory);
+        paging_destroy_address_space(directory);
         return 0;
     }
 
     uint32_t stack_phys = frame_alloc();
-    if (stack_phys == FRAME_INVALID || stack_phys >= PAGING_IDENTITY_LIMIT) {
+
+    if (stack_phys == FRAME_INVALID ||
+        stack_phys >= PAGING_IDENTITY_LIMIT) {
         if (stack_phys != FRAME_INVALID)
             frame_free(stack_phys);
+
         frame_free(code_phys);
-        frame_free(directory);
+        paging_destroy_address_space(directory);
         return 0;
     }
 
     uint8_t *stack_dst = (uint8_t *)stack_phys;
+
     for (uint32_t k = 0; k < PAGE_SIZE; k++)
         stack_dst[k] = 0;
 
     if (paging_map_in_directory(directory, TASK_RING3_STACK_VA, stack_phys,
-            PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
+                                PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
         frame_free(stack_phys);
         frame_free(code_phys);
-        frame_free(directory);
+        paging_destroy_address_space(directory);
         return 0;
     }
 
+    /*
+     * The old image is still in use until the frame is popped, so hand
+     * it to task_wait() rather than freeing it now.
+     *
+     * CR3 must be pointed at the new directory *before* returning.
+     * Nothing else reloads it until this task is next scheduled, and
+     * the iret on the way out would otherwise land back in the old
+     * code page -- which re-entered the old program instead of the
+     * new one. Both directories share the master's kernel mappings, so
+     * switching while still executing on the kernel stack is safe.
+     */
+    task->reclaim_directory = task->page_directory;
     task->page_directory = directory;
+
+    paging_switch_directory(directory);
 
     task->signals.pending = 0;
     task->signals.mask = 0;
-    for (int s = 0; s < 32; s++) {
-        task->signals.handlers[s] = 0;
-    }
 
-    task->switch_esp = task_prepare_user_stack(
-        task->stack_base, task->stack_size,
-        TASK_RING3_CODE_VA, TASK_RING3_STACK_TOP
-    );
+    for (int s = 0; s < 32; s++)
+        task->signals.handlers[s] = 0;
+
+    /*
+     * Point the interrupted context at the new image: popa will load
+     * EAX 0, and iret will enter the new program at CPL 3 with a fresh
+     * user stack.
+     *
+     * On a privilege change the CPU pushed, lowest address first,
+     * EIP, CS, EFLAGS, ESP, SS -- so ESP comes before SS here. The two
+     * were the wrong way round, and iret loaded SS with a stack
+     * pointer, which raised a #GP.
+     */
+    frame[7] = 0;
+    frame[8] = TASK_RING3_CODE_VA;
+    frame[9] = USER_CODE_SELECTOR;
+    frame[10] = 0x00000202;
+    frame[11] = TASK_RING3_STACK_TOP;
+    frame[12] = USER_DATA_SELECTOR;
 
     return 1;
 }
@@ -1334,8 +1387,17 @@ int task_wait(uint32_t child_id)
 
         child->page_directory = PAGE_DIRECTORY_ADDRESS;
 
+        /* An image retired by exec() is still outstanding. */
+        if (child->reclaim_directory != 0 &&
+            child->reclaim_directory != PAGE_DIRECTORY_ADDRESS) {
+
+            paging_destroy_address_space(child->reclaim_directory);
+        }
+
         __asm__ volatile ("sti");
     }
+
+    child->reclaim_directory = 0;
 
     /*
      * Close any open file descriptors.
@@ -1366,6 +1428,7 @@ int task_wait(uint32_t child_id)
     child->stack_base = 0;
     child->stack_size = 0;
     child->switch_esp = 0;
+    child->reclaim_directory = 0;
 
     child->context.eax = 0;
     child->context.ebx = 0;

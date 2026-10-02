@@ -35,7 +35,9 @@ The suite drives real work rather than just initialisation: a CPL 3 task does
 file I/O through the syscall table and the kernel re-reads what it wrote, two
 Ring 3 programs fault deliberately and must be retired without taking the
 machine down, and `fork()` is checked for real address-space isolation (the
-child overwrites an inherited page; the parent's copy must be untouched).
+child overwrites an inherited page; the parent's copy must be untouched),
+and `exec()` replaces a Ring 3 image with a program read from LumenFS whose
+output the kernel then verifies.
 
 ---
 
@@ -76,7 +78,7 @@ child overwrites an inherited page; the parent's copy must be untouched).
 | Syscalls | Implemented (partial) | 25 numbers defined in `syscall.h` (`SYS_GETPID` .. `SYS_RECV`) and dispatched in a `switch`. Some are thin: `SYS_SOCKET` returns a fixed loopback fd |
 | ATA driver | Implemented | PIO reads/writes, used by LumenFS. DMA is compiled out by default -- see limitations |
 | LumenFS v2 | Implemented | 1 KiB blocks, inodes, directories, direct + indirect blocks, symlinks, hard links, Unix-style permissions and `chmod`/`chown`. v1 images are rejected at mount. See [Storage](#storage) |
-| ELF loader | Implemented | `loader.c` starts a flat binary or an ELF executable from LumenFS as a Ring 3 task |
+| ELF loader | Implemented | `loader.c` starts a flat binary or an ELF executable from LumenFS as a Ring 3 task. The flat-binary path is covered end to end by the RING3EXE self-test; the ELF header path is not |
 | Shell | Implemented | Line editor plus commands for tasks, storage, users, settings, networking, and demos. `help` output lags the real command set |
 | Users | Implemented | `users.c`; `sudo`, `useradd`, `login` |
 | Settings | Implemented | `settings.c`; persisted to LumenFS |

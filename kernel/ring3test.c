@@ -24,6 +24,10 @@ extern uint8_t ring3_badop_entry[];
 extern uint32_t ring3_badop_size;
 extern uint8_t ring3_fork_entry[];
 extern uint32_t ring3_fork_size;
+extern uint8_t ring3_exec_entry[];
+extern uint32_t ring3_exec_size;
+extern uint8_t ring3_execprog[];
+extern uint32_t ring3_execprog_len;
 
 extern volatile uint32_t timer_ticks;
 
@@ -56,6 +60,7 @@ extern volatile uint32_t timer_ticks;
 #define FORK_DONE_MAGIC 0x00C0FFEEU
 #define RES_FORK_PARENTBUF (R3_RES_BASE + 0x58)
 #define RES_FORK_CHILDBUF  (R3_RES_BASE + 0x5C)
+#define RES_EXEC_RC        (R3_RES_BASE + 0x60)
 
 #define R3_FAIL_MARK 0xDEADBEEFU
 
@@ -479,6 +484,107 @@ int ring3_fault_run_self_test(void)
 
         fs_delete(R3_FILE, FS_ROOT);
     }
+
+#undef CHECK
+
+    return failures == 0;
+}
+
+/*
+ * exec() end to end.
+ *
+ * The launcher task execs a program from LumenFS, which replaces its
+ * own image. The loaded program then writes a file, so a pass means the
+ * whole chain worked: the image was read, mapped, entered at Ring 3,
+ * and could do file I/O from its brand new address space.
+ */
+int ring3_exec_run_self_test(void)
+{
+    int failures = 0;
+
+#define CHECK(cond, msg)                                                   \
+    do {                                                                   \
+        if (!(cond)) {                                                     \
+            console_error("RING3 self-test: " msg);                         \
+            failures++;                                                    \
+        }                                                                  \
+    } while (0)
+
+    if (!fs_is_mounted()) {
+        console_warn("RING3 self-test: no filesystem, skipping exec");
+        return 1;
+    }
+
+    static const char prog_path[] = R3_DIR "/prog.bin";
+    static const char out_path[]  = R3_DIR "/prog.out";
+
+    fs_mkdir(R3_DIR, FS_ROOT, FS_MODE_DIR_DEFAULT);
+    fs_delete(prog_path, FS_ROOT);
+    fs_delete(out_path, FS_ROOT);
+
+    /* Put the program to be exec'd on the filesystem. */
+    CHECK(fs_write(prog_path, FS_ROOT, ring3_execprog, ring3_execprog_len)
+              == FS_OK,
+          "could not stage the exec'd program");
+
+    int id = task_create_user_program(ring3_exec_entry, ring3_exec_size);
+
+    if (id < 0) {
+        console_error("RING3 self-test: could not create the exec launcher");
+        return 0;
+    }
+
+    const task_t *probe = task_get((uint32_t)id);
+    uint32_t dir = probe != 0 ? probe->page_directory : 0;
+    uint32_t start = timer_ticks;
+
+    for (;;) {
+        const task_t *t = task_get((uint32_t)id);
+
+        if (t == 0 || t->state == TASK_TERMINATED)
+            break;
+
+        if (timer_ticks - start > 3000) {
+            console_error("RING3 self-test: the exec launcher never "
+                          "finished");
+            break;
+        }
+
+        __asm__ volatile ("hlt");
+    }
+
+    /*
+     * There is deliberately no check on the launcher's SYS_EXEC
+     * return value: exec replaces the caller's image, so the caller
+     * never gets to store a result. The file below is the proof.
+     */
+    (void)dir;
+
+    /*
+     * The real proof: the program that replaced the launcher's image
+     * wrote this. Nothing in the kernel produced it.
+     */
+    {
+        void *back = 0;
+        uint32_t size = 0;
+
+        int rc = fs_read(out_path, FS_ROOT, &back, &size);
+
+        CHECK(rc == FS_OK, "the exec'd program wrote no output file");
+        CHECK(size == 7, "the output file has the wrong size");
+
+        if (back != 0) {
+            CHECK(memcmp(back, "EXEC_OK", 7) == 0,
+                  "the exec'd program wrote the wrong contents");
+
+            kfree(back);
+        }
+    }
+
+    task_wait((uint32_t)id);
+
+    fs_delete(prog_path, FS_ROOT);
+    fs_delete(out_path, FS_ROOT);
 
 #undef CHECK
 

@@ -198,7 +198,11 @@ void syscall_handler(uint32_t *frame)
             const char *path =
                 caller_is_user ? kpath : (const char *)upath;
 
-            frame[7] = sys_exec(path) ? 0 : 0xFFFFFFFFU;
+            /* sys_exec rewrites the frame itself so the return path
+             * enters the new image; on failure it leaves it alone and
+             * we report the error as usual. */
+            if (!sys_exec(path, frame))
+                frame[7] = 0xFFFFFFFFU;
             break;
         }
 

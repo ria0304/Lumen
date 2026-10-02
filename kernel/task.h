@@ -69,6 +69,14 @@ typedef struct {
 
     fd_table_t fd_table;
     uint32_t cwd_inode;
+
+    /*
+     * Address space retired by exec(), pending reclaim by task_wait().
+     * It cannot be freed inside sys_exec() because the CPU is still
+     * running from it until the syscall frame is popped.
+     */
+    uint32_t reclaim_directory;
+
     signal_t signals;
 } task_t;
 
@@ -100,7 +108,12 @@ int task_create_user_program(const uint8_t *code, uint32_t code_size);
 int task_create_user_elf(const Elf32_Ehdr *ehdr, const void *buffer, uint32_t size);
 
 int task_fork(void);
-int sys_exec(const char *filename);
+/*
+ * Replace this task's image with 'filename' and enter it at Ring 3.
+ * Rewrites the live syscall frame 'frame' so the syscall return path
+ * lands in the new program. Returns 1 on success, 0 on failure.
+ */
+int sys_exec(const char *filename, uint32_t *frame);
 
 int sys_kill(uint32_t pid, int sig);
 int sys_signal(int sig, void (*handler)(int));
