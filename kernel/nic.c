@@ -162,8 +162,15 @@ int nic_send(const void *frame, uint32_t len){
     const uint8_t *p=(const uint8_t*)frame;
     for(uint32_t i=0;i<len;i++) tx_buf[i]=p[i];
     int d = tx_idx; tx_idx=(tx_idx+1)&3;
+    /*
+     * TSADn holds the packet address; 0x10 is TxDescriptorStart, the
+     * base of the descriptor array -- it is not a length field. The
+     * descriptor itself supplies the length and the packet pointer,
+     * and filling it is not enough: the ring is only scanned when the
+     * Tx bit of the Tx Command register (0x50) is written.
+     */
     outl((uint16_t)(iob+0x20+d*4), tx_phys);
-    outl((uint16_t)(iob+0x10+d*4), len);
+    outl((uint16_t)(iob+0x50), 0x01);
     uint32_t t=timer_ticks;
     while(timer_ticks-t<50){
         uint16_t isr=inw(iob+0x3E);

@@ -81,7 +81,7 @@ child overwrites an inherited page; the parent's copy must be untouched).
 | Users | Implemented | `users.c`; `sudo`, `useradd`, `login` |
 | Settings | Implemented | `settings.c`; persisted to LumenFS |
 | RTC | Implemented | Wall-clock time; `date` |
-| Network | Partial | RTL8139 PCI driver, ARP, ICMP echo, `ping`. TX works; the receive ring never yields a frame, so only the loopback path is exercisable. See limitations |
+| Network | Non-functional on real NIC | Loopback send/recv works. The RTL8139 driver finds and initialises the device but neither transmits nor receives; ARP and ICMP are coded and unit-tested only. See limitations |
 | GUI | Implemented (minimal) | Text-mode desktop (`gui.c`, `gfx.c`) |
 | Cron / klog | Implemented (basic) | `cron.c` job table, `klog.c` kernel log ring |
 | `pkg` | Stub | In-memory table of up to 16 name/version pairs. Nothing is downloaded, unpacked, or persisted |
@@ -255,15 +255,29 @@ identity exists so the permission checks can be tested.
   `make run` message, and image filename (`build/lumen.img`) all use one name and one version
   string from `kernel/version.h`.
 - **`help` lags the shell.** It lists only a subset of the commands the shell accepts.
-- **The NIC receive path is incomplete.** Transmit works and the
-  RTL8139 is found and initialised, but no frame is ever retrieved from
-  the receive ring under QEMU, so `ping` gets no reply and ARP never
-  resolves. `make test` attaches the NIC on QEMU's user-mode network and
-  exercises the stack for real; it reports the failure and skips rather
-  than passing silently. Two genuine driver bugs were found and fixed
-  on the way -- the 8 KiB receive ring was being backed by a single 4 KiB
-  frame, and ARP frames were sent 42 bytes long, below the 60-byte
-  Ethernet minimum -- but the remaining gap is not yet diagnosed.
+- **The RTL8139 driver does not work end to end.** The device is found,
+  initialised and addressed correctly, and the ARP/ICMP code builds
+  well-formed frames, but no frame reaches the wire and none is ever
+  received, so `ping` gets no reply. `make test` attaches the NIC on
+  QEMU's user-mode network and drives a real ARP and ICMP exchange, so
+  this is reported on every run rather than passing silently; the test
+  skips (does not fail) when no peer answers.
+
+  Bugs found and fixed while diagnosing it:
+
+  - the 8 KiB receive ring was backed by a single 4 KiB frame, so the
+    ring ran past its own allocation;
+  - ARP frames were sent 42 bytes long, below the 60-byte Ethernet
+    minimum, so they were dropped before reaching the peer;
+  - register 0x10 (TxDescriptorStart) was being written with a length;
+    it is the base address of the descriptor array;
+  - the transmit was never kicked via the Tx Command register (0x50).
+
+  What is still unexplained, from a host-side frame capture: with the
+  descriptor correctly filled, TxCommand written and the interrupt mask
+  unmasked, the transmit still never completes (no TOK) and nothing
+  appears on the wire. The receive ring is likewise never populated.
+  The remaining work is to drive this device model correctly.
 - **`SYS_WAIT` does not block.** It reaps an already-exited child and
   returns -1 otherwise, so a program that forks must keep yielding and
   retrying until the timer actually switches to the child.
