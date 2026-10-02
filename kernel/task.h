@@ -78,6 +78,13 @@ int task_create(void);
 int task_create_with_privilege(uint32_t privilege);
 
 /*
+ * Fork from a Ring 3 task. 'frame' is the interrupted syscall frame
+ * the child must resume through; see the definition for why it is
+ * required.
+ */
+int task_fork_user(uint32_t *frame);
+
+/*
  * Creates a Ring 3 task whose code page is a copy of 'code'
  * (up to PAGE_SIZE bytes -- one page, same limit the legacy
  * 'taskuser' path already has). Used by the loader to run a

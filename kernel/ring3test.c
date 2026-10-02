@@ -22,6 +22,8 @@ extern uint8_t ring3_fault_entry[];
 extern uint32_t ring3_fault_size;
 extern uint8_t ring3_badop_entry[];
 extern uint32_t ring3_badop_size;
+extern uint8_t ring3_fork_entry[];
+extern uint32_t ring3_fork_size;
 
 extern volatile uint32_t timer_ticks;
 
@@ -45,6 +47,13 @@ extern volatile uint32_t timer_ticks;
 #define RES_YIELD     (R3_RES_BASE + 0x28)
 #define RES_CLOSE2    (R3_RES_BASE + 0x2C)
 #define RES_SHORTREAD (R3_RES_BASE + 0x34)
+#define RES_FORK_PID  (R3_RES_BASE + 0x40)
+#define RES_FORK_CHILD (R3_RES_BASE + 0x44)
+#define RES_FORK_PPID (R3_RES_BASE + 0x48)
+#define RES_FORK_PPID2 (R3_RES_BASE + 0x4C)
+#define RES_FORK_WAIT (R3_RES_BASE + 0x50)
+#define RES_FORK_DONE (R3_RES_BASE + 0x54)
+#define FORK_DONE_MAGIC 0x00C0FFEEU
 
 #define R3_FAIL_MARK 0xDEADBEEFU
 
@@ -197,9 +206,133 @@ int ring3_io_run_self_test(void)
 }
 
 /*
- * Run one program that is expected to fault, and check that the fault
- * retired it without taking the machine with it.
+ * fork() from Ring 3. SYS_FORK is dispatched to task_fork_user() for
+ * a user caller, which clones the address space and gives the child a
+ * copy of the interrupted frame so the child resumes after the syscall
+ * with EAX == 0. Both the parent's view (a positive child id, then a
+ * successful wait) and the child's view (fork() == 0, and a parent
+ * that is the task we forked from) are checked.
  */
+int ring3_fork_run_self_test(void)
+{
+    int failures = 0;
+
+#define CHECK(cond, msg)                                                   \
+    do {                                                                   \
+        if (!(cond)) {                                                     \
+            console_error("RING3 self-test: " msg);                         \
+            failures++;                                                    \
+        }                                                                  \
+    } while (0)
+
+    int id = task_create_user_program(ring3_fork_entry, ring3_fork_size);
+
+    if (id < 0) {
+        console_error("RING3 self-test: could not create the fork probe");
+        return 0;
+    }
+
+    const task_t *probe = task_get((uint32_t)id);
+    uint32_t dir = probe != 0 ? probe->page_directory : 0;
+    uint32_t parent_pid = probe != 0 ? probe->id : 0;
+
+    /*
+     * Phase 1: wait for the child to publish its results. It stays
+     * alive afterwards, because the parent's SYS_WAIT would release
+     * the very pages we need to read.
+     */
+    uint32_t child_pid = 0;
+    uint32_t child_fork_return = 0xDEADBEEFU;
+    uint32_t child_ppid = 0xDEADBEEFU;
+    int child_seen = 0;
+    uint32_t start = timer_ticks;
+
+    for (;;) {
+        uint32_t pid = r3_read(dir, RES_FORK_PID);
+
+        if (pid != 0xDEADBEEFU && (int32_t)pid > 0) {
+            const task_t *c = task_get(pid);
+
+            if (c != 0) {
+                child_pid = pid;
+
+                if (r3_read(c->page_directory, RES_FORK_DONE)
+                    == FORK_DONE_MAGIC) {
+
+                    CHECK(c->page_directory != dir,
+                          "the child shares the parent's address space");
+
+                    child_fork_return =
+                        r3_read(c->page_directory, RES_FORK_CHILD);
+                    child_ppid = r3_read(c->page_directory, RES_FORK_PPID);
+
+                    CHECK((int32_t)child_ppid == (int32_t)parent_pid,
+                          "the child's parent id is wrong");
+
+                    child_seen = 1;
+                    break;
+                }
+            }
+        }
+
+        const task_t *t = task_get((uint32_t)id);
+
+        if (t == 0 || t->state == TASK_TERMINATED)
+            break;
+
+        if (timer_ticks - start > 3000) {
+            console_error("RING3 self-test: the fork child never "
+                          "published its results");
+            break;
+        }
+
+        __asm__ volatile ("hlt");
+    }
+
+    CHECK(child_seen, "the child never published its results");
+    CHECK(child_fork_return == 0, "the child did not see fork() return 0");
+    CHECK((int32_t)child_pid > 0, "fork did not return a child id");
+
+    /* Retire the child so the parent's blocking-free wait can finish. */
+    if (child_seen)
+        task_terminate(child_pid);
+
+    /*
+     * Phase 2: the parent is spinning in its yield/wait loop; it
+     * completes once the child is gone.
+     */
+    for (;;) {
+        const task_t *t = task_get((uint32_t)id);
+
+        if (t == 0 || t->state == TASK_TERMINATED)
+            break;
+
+        if (timer_ticks - start > 6000) {
+            console_error("RING3 self-test: the fork parent never "
+                          "finished waiting");
+            break;
+        }
+
+        __asm__ volatile ("hlt");
+    }
+
+    const task_t *done = task_get((uint32_t)id);
+
+    CHECK(done != 0 && done->state == TASK_TERMINATED,
+          "the fork probe did not terminate");
+
+    CHECK((int32_t)r3_read(dir, RES_FORK_WAIT) == (int32_t)child_pid,
+          "wait did not return the child id");
+
+    if ((int32_t)child_pid > 0)
+        task_wait(child_pid);
+
+    task_wait((uint32_t)id);
+
+#undef CHECK
+
+    return failures == 0;
+}
 static int ring3_expect_fault(const char *what,
                               const uint8_t *code,
                               uint32_t size)
@@ -247,6 +380,11 @@ static int ring3_expect_fault(const char *what,
 
     return 1;
 }
+
+/*
+ * Run one program that is expected to fault, and check that the fault
+ * retired it without taking the machine with it.
+ */
 
 /*
  * Fault isolation. Two programs that fault for different reasons must

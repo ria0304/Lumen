@@ -160,7 +160,18 @@ void syscall_handler(uint32_t *frame)
 
         case SYS_FORK:
         {
-            int child = task_fork();
+            /*
+             * A Ring 3 caller needs task_fork_user(), which clones
+             * the address space and hands the child a copy of this
+             * frame so it resumes after the syscall with EAX = 0.
+             * task_fork() is for kernel-ring callers and deliberately
+             * refuses a user task.
+             */
+            int child =
+                caller_is_user
+                    ? task_fork_user(frame)
+                    : task_fork();
+
             frame[7] = (child >= 0) ? (uint32_t)child : 0xFFFFFFFFU;
             break;
         }

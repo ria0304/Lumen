@@ -22,6 +22,8 @@ global ring3_fault_entry
 global ring3_badop_entry
 global ring3_fault_size
 global ring3_badop_size
+global ring3_fork_entry
+global ring3_fork_size
 
 ; User addresses. These sit at the very bottom of the stack page
 ; (0x01001000), well below where the stack pointer starts
@@ -225,3 +227,94 @@ align 4
 global ring3_badop_size
 ring3_badop_size:
     dd ring3_badop_entry_end - ring3_badop_entry
+; ---- Fork probe -------------------------------------------------------
+;
+; The parent forks; the child must see fork() return 0 and the parent a
+; positive child id. Both then exit, and the kernel reaps them and
+; checks the parent/child relationship held while they ran.
+
+RES_FORK_PID  equ RES_BASE + 0x40     ; parent: the child id, expect > 0
+RES_FORK_CHILD equ RES_BASE + 0x44    ; child: 0
+RES_FORK_PPID  equ RES_BASE + 0x48    ; child: parent's pid, expect > 0
+RES_FORK_PPID2 equ RES_BASE + 0x4C    ; parent: its own parent id
+RES_FORK_WAIT  equ RES_BASE + 0x50    ; parent: SYS_WAIT result, expect > 0
+RES_FORK_DONE  equ RES_BASE + 0x54    ; child: written last, "results ready"
+
+FORK_DONE_MAGIC equ 0x00C0FFEE
+
+SYS_GETPPID   equ 7
+SYS_FORK      equ 5
+SYS_WAIT      equ 4
+
+ring3_fork_entry:
+    call_sys SYS_FORK, 0, 0, 0
+    store_res RES_FORK_PID              ; parent: child id; child: 0
+
+    test eax, eax
+    jz .child                           ; fork() returned 0: we are the child
+    js .failed                          ; negative: fork failed
+
+    ; ---- parent ----
+    call_sys SYS_GETPPID, 0, 0, 0
+    store_res RES_FORK_PPID2
+
+    ; SYS_WAIT does not block -- it reaps a child that has already
+    ; exited -- and task_yield() only marks us runnable, so the real
+    ; switch happens on the next 10 ms timer tick. Yielding a fixed few
+    ; times therefore does nothing: we would finish the loop long
+    ; before a tick. Keep yielding and retrying until the child is
+    ; gone, with a bound so a wedged child fails the test instead of
+    ; hanging the boot.
+    mov esi, 20000
+
+.parent_wait_loop:
+    call_sys SYS_YIELD, 0, 0, 0
+
+    mov ebx, [RES_FORK_PID]
+    call_sys SYS_WAIT, ebx, 0, 0
+
+    cmp eax, 0
+    jge .wait_ok
+
+    dec esi
+    jnz .parent_wait_loop
+
+    call_sys SYS_EXIT, 2, 0, 0
+    jmp .hang
+
+.wait_ok:
+    store_res RES_FORK_WAIT
+
+    call_sys SYS_EXIT, 0, 0, 0
+    jmp .hang
+
+.child:
+    ; EAX came back 0, which is exactly what fork() owes the child.
+    store_res RES_FORK_CHILD
+
+    call_sys SYS_GETPPID, 0, 0, 0
+    store_res RES_FORK_PPID
+
+    ; Publish the results, then keep running instead of exiting.
+    ;
+    ; The kernel has to read these out of the child's own address
+    ; space, and the parent's SYS_WAIT would reap it -- and with it
+    ; release those pages -- before the kernel got a look. The marker
+    ; is written last, so its presence means both results are settled.
+    mov dword [RES_FORK_DONE], FORK_DONE_MAGIC
+
+.child_spin:
+    jmp .child_spin
+
+.failed:
+    call_sys SYS_EXIT, 1, 0, 0
+
+.hang:
+    jmp .hang
+
+ring3_fork_entry_end:
+
+align 4
+global ring3_fork_size
+ring3_fork_size:
+    dd ring3_fork_entry_end - ring3_fork_entry

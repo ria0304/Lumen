@@ -3,6 +3,9 @@
 #include "paging.h"
 #include "frame.h"
 #include "console.h"
+#include "kmem.h"
+
+static void print_hex32(uint32_t v){const char h[]="0123456789ABCDEF";terminal_write("0x");for(int i=7;i>=0;i--)terminal_putchar(h[(v>>(i*4))&0xF]);}
 
 static uint32_t *const page_directory =
     (uint32_t *)PAGE_DIRECTORY_ADDRESS;
@@ -711,6 +714,123 @@ int paging_map_in_directory(
  * kernel directory), then free the directory itself. Shared
  * (kernel-space) entries are left completely untouched.
  */
+/*
+ * Duplicate the user half of an address space.
+ *
+ * paging_create_address_space() already copied the master directory,
+ * so the new directory holds the correct kernel mappings. All that is
+ * left is to give the child its own copy of every user page, so that
+ * neither task can see the other's writes.
+ *
+ * Each page-directory entry needs both cases handled correctly:
+ *
+ *   PS = 0  the entry points at a page table. That table must be
+ *           copied too, and every present PTE in it given its own
+ *           frame. Copying the table's own frame as though it were a
+ *           page looks like it works -- the child still resolves every
+ *           address -- but both tasks then share the same physical
+ *           frames, so writes cross between them.
+ *
+ *   PS = 1  the entry maps 4 MiB directly. Lumen never creates one of
+ *           these for a user task, and copying it is not meaningful, so
+ *           it is refused rather than silently mishandled.
+ */
+int paging_clone_address_space(
+    uint32_t source_directory_physical,
+    uint32_t *out
+)
+{
+    if (out == 0 ||
+        source_directory_physical == 0 ||
+        source_directory_physical == PAGE_DIRECTORY_ADDRESS ||
+        source_directory_physical >= PAGING_IDENTITY_LIMIT) {
+        return -1;
+    }
+
+    uint32_t dst_phys = paging_create_address_space();
+
+    if (dst_phys == FRAME_INVALID)
+        return -1;
+
+    uint32_t *src = (uint32_t *)source_directory_physical;
+    uint32_t *dst = (uint32_t *)dst_phys;
+
+    for (uint32_t pde = USER_PDE_START; pde < USER_PDE_LIMIT; pde++) {
+
+        uint32_t entry = src[pde];
+
+        if ((entry & PAGE_PRESENT) == 0)
+            continue;
+
+        if ((entry & 0x80U) != 0) {
+            console_error("Address space: 4 MiB user page at PDE ");
+            print_hex32(pde);
+            terminal_putchar('\n');
+            paging_destroy_address_space(dst_phys);
+            return -1;
+        }
+
+        uint32_t src_table = entry & 0xFFFFF000U;
+        uint32_t dst_table = frame_alloc();
+
+        if (dst_table == FRAME_INVALID ||
+            dst_table >= PAGING_IDENTITY_LIMIT) {
+
+            if (dst_table != FRAME_INVALID)
+                frame_free(dst_table);
+
+            paging_destroy_address_space(dst_phys);
+            return -1;
+        }
+
+        uint32_t *src_pt = (uint32_t *)src_table;
+        uint32_t *dst_pt = (uint32_t *)dst_table;
+        uint32_t dir_flags = entry & (PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
+
+        for (uint32_t pte = 0; pte < PAGE_ENTRIES; pte++) {
+
+            uint32_t page = src_pt[pte];
+
+            if ((page & PAGE_PRESENT) == 0) {
+                dst_pt[pte] = 0;
+                continue;
+            }
+
+            uint32_t dst_frame = frame_alloc();
+
+            if (dst_frame == FRAME_INVALID ||
+                dst_frame >= PAGING_IDENTITY_LIMIT) {
+
+                if (dst_frame != FRAME_INVALID)
+                    frame_free(dst_frame);
+
+                frame_free(dst_table);
+                paging_destroy_address_space(dst_phys);
+                return -1;
+            }
+
+            memcpy(
+                (void *)dst_frame,
+                (const void *)(page & 0xFFFFF000U),
+                PAGE_SIZE
+            );
+
+            /* Keep the real flags (present/write/user) from the
+             * source; the frame number is the only thing that changes.
+             * The child is never read-only against the parent, so a
+             * private copy does not need copy-on-write here. */
+            dst_pt[pte] =
+                dst_frame | (page & (PAGE_PRESENT | PAGE_WRITE | PAGE_USER));
+        }
+
+        dst[pde] = dst_table | dir_flags;
+    }
+
+    *out = dst_phys;
+
+    return 0;
+}
+
 void paging_destroy_address_space(
     uint32_t directory_physical
 )

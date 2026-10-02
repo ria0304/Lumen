@@ -115,7 +115,40 @@ int paging_run_self_test(void);
  */
 #define PAGING_IDENTITY_LIMIT 0x00400000U
 
+/*
+ * User virtual addresses live in [USER_ADDR_MIN, 0xC0000000), which
+ * is page-directory entries USER_PDE_START..USER_PDE_LIMIT-1. Entry
+ * USER_PDE_LIMIT and above belong to the kernel half and are shared,
+ * never copied.
+ *
+ * The entries below USER_PDE_START are the kernel's own low identity
+ * map (the first 4 MiB), which paging_create_address_space() copies in
+ * along with everything else. They are not user pages, are not
+ * private to the task, and must not be duplicated.
+ */
+#define USER_PDE_START 4U
+#define USER_PDE_LIMIT 768U
+
 uint32_t paging_create_address_space(void);
+
+/*
+ * Duplicate the user half of an address space into a fresh one, so a
+ * forked task gets private copies of every page it can reach. Only
+ * mappings below USER_PDE_LIMIT are copied; the kernel half is
+ * inherited from the master directory by
+ * paging_create_address_space() and must not be duplicated, or the
+ * two tasks would end up with divergent copies of kernel memory.
+ *
+ * Writes a full copy (no copy-on-write): a fork is rare and the cost
+ * is bounded by the task's own footprint.
+ *
+ * Returns 0 and stores the new directory in *out on success, -1 on
+ * failure, having released everything it allocated.
+ */
+int paging_clone_address_space(
+    uint32_t source_directory_physical,
+    uint32_t *out
+);
 
 int paging_map_in_directory(
     uint32_t directory_physical,

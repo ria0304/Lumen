@@ -913,6 +913,116 @@ int task_create_user_elf(const Elf32_Ehdr *ehdr, const void *buffer, uint32_t si
     return (int)i;
 }
 
+/*
+ * Fork for a Ring 3 caller.
+ *
+ * 'frame' is the interrupted context the syscall stub pushed, which is
+ * where the child has to resume: immediately after the `int 0x80`
+ * that performed the fork, with EAX already zeroed so the child sees
+ * fork() return 0. Building that frame on the child's own kernel stack
+ * is what lets both tasks continue from the same user instruction
+ * with independent return values.
+ *
+ * The child gets a private copy of the parent's user pages, a copy of
+ * the parent's live stack contents, and copies of its file
+ * descriptors, working directory and signal state.
+ */
+int task_fork_user(uint32_t *frame)
+{
+    if (frame == 0)
+        return -1;
+
+    uint32_t parent_id = scheduler_current_task();
+    task_t *parent = (task_t *)task_get(parent_id);
+
+    if (parent == 0 || parent->privilege != USER_RING)
+        return -1;
+
+    int child_id = -1;
+
+    for (uint32_t i = 1; i <= MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_UNUSED ||
+            tasks[i].state == TASK_TERMINATED) {
+            child_id = (int)i;
+            break;
+        }
+    }
+
+    if (child_id < 0)
+        return -1;
+
+    __asm__ volatile ("cli");
+
+    uint32_t child_dir = 0;
+
+    if (paging_clone_address_space(parent->page_directory,
+                                   &child_dir) != 0) {
+        __asm__ volatile ("sti");
+        return -1;
+    }
+
+    task_t *child = &tasks[child_id];
+
+    child->id = (uint32_t)child_id;
+    child->parent_id = parent_id;
+    child->state = TASK_READY;
+    child->privilege = USER_RING;
+    child->page_directory = child_dir;
+    child->stack_base = (uint32_t)&task_stacks[child_id][0];
+    child->stack_size = TASK_STACK_SIZE;
+    child->cwd_inode = parent->cwd_inode;
+    child->signals = parent->signals;
+
+    for (int j = 0; j < MAX_FDS; j++) {
+        child->fd_table.open[j] = parent->fd_table.open[j];
+
+        if (parent->fd_table.open[j])
+            child->fd_table.handles[j] = parent->fd_table.handles[j];
+    }
+
+    /*
+     * Copy the interrupted context onto the child's kernel stack and
+     * point switch_esp at it. The stub pops the pusha block and then
+     * iret's, so the whole frame has to be reproduced verbatim --
+     * EIP, CS, EFLAGS, SS and the user ESP included -- or the child
+     * would resume in Ring 0 with the parent's registers.
+     *
+     * task_stacks[] is static kernel memory, so this is a plain copy
+     * from the current context: no need to migrate the CPU onto the
+     * child's stack to write it.
+     */
+    uint32_t child_stack_top = child->stack_base + child->stack_size;
+    uint32_t child_frame = child_stack_top - 128;
+    uint32_t *dst = (uint32_t *)child_frame;
+
+    for (uint32_t w = 0; w < 15; w++)
+        dst[w] = frame[w];
+
+    /* The child resumes here with EAX = 0. */
+    dst[7] = 0;
+
+    /* Keep the saved context struct in step, since save_task_context()
+     * reads back from this same frame on the next switch. */
+    child->context.edi = dst[0];
+    child->context.esi = dst[1];
+    child->context.ebp = dst[2];
+    child->context.esp = (uint32_t)dst + 32;
+    child->context.ebx = dst[4];
+    child->context.edx = dst[5];
+    child->context.ecx = dst[6];
+    child->context.eax = 0;
+    child->context.eip = dst[8];
+    child->context.eflags = dst[10];
+
+    child->switch_esp = child_frame;
+
+    active_tasks++;
+
+    __asm__ volatile ("sti");
+
+    return child_id;
+}
+
 int task_fork(void)
 {
     uint32_t parent_id = scheduler_current_task();

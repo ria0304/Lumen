@@ -20,4 +20,7 @@ int ring3_io_run_self_test(void);
  */
 int ring3_fault_run_self_test(void);
 
+/* fork() from Ring 3: clone, child return value, parent/child link. */
+int ring3_fork_run_self_test(void);
+
 #endif
