@@ -99,6 +99,22 @@ void exception_handler(
     print_hex32(error_code);
     terminal_putchar('\n');
 
+    /* Where it happened. The frame is the interrupted context the
+     * stub pushed, so saved_eip is the faulting instruction. */
+    if (frame != 0) {
+        terminal_write("[ERROR] EIP: ");
+        print_hex32(frame[/* saved_eip */ 8]);
+        terminal_putchar('\n');
+
+        terminal_write("[ERROR] EBP: ");
+        print_hex32(frame[/* saved_ebp */ 5]);
+        terminal_putchar('\n');
+
+        terminal_write("[ERROR] ESP: ");
+        print_hex32(frame[/* saved_esp */ 3]);
+        terminal_putchar('\n');
+    }
+
     if (vector == 14) {
         uint32_t cr2;
 

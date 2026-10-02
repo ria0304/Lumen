@@ -324,9 +324,6 @@ static void fs_inode_init(fs_inode_t *in, uint8_t type, uint16_t uid,
     for (uint32_t i = 0; i < FS_DIRECT_BLOCKS; i++)
         in->direct[i] = FS_BLOCK_NONE;
 
-    for (uint32_t i = 0; i < 8; i++)
-        in->reserved[i] = 0;
-
     in->type = type;
     in->mode = mode & FS_MODE_MASK;
     in->uid = uid;
@@ -416,8 +413,16 @@ static int fs_map_block(fs_inode_t *in, uint32_t index, int creating,
 {
     if (index < FS_DIRECT_BLOCKS) {
         if (in->direct[index] == FS_BLOCK_NONE) {
-            if (!creating)
+            if (!creating) {
+
+                /* Past end of file. Report "no block" rather than
+                 * returning success with *out still holding whatever
+                 * the caller had in it -- an uninitialised block
+                 * number reached fs_block_read() and page-faulted at
+                 * 0xFFFFFFFF. */
+                *out = FS_BLOCK_NONE;
                 return FS_OK;
+            }
 
             uint32_t b = bitmap_find_free(0);
 
@@ -613,6 +618,18 @@ static int fs_inode_write_at(fs_inode_t *in, uint32_t offset,
 
 /* Locate a name inside a directory inode. Returns the entry's byte
  * offset within the directory's data, or FS_ENOENT. */
+/* A slot is live only if it names a usable inode. Unwritten slots in a
+ * freshly allocated directory block are all zero, and ino == 0 is a
+ * perfectly valid inode number (it is the root directory), so testing
+ * only `ino != FS_BLOCK_NONE` made every blank slot look occupied.
+ * fs_dirent_remove() marks a retired slot with FS_TYPE_FREE, and a
+ * zeroed slot decodes as FS_TYPE_FREE too, so the type field is the
+ * reliable marker. */
+static int fs_dirent_live(const fs_dirent_t *ent)
+{
+    return ent->ino != FS_BLOCK_NONE && ent->type != FS_TYPE_FREE;
+}
+
 static int fs_dirent_find(fs_inode_t *dir, const char *name,
                           uint32_t name_len, uint32_t *out_offset)
 {
@@ -630,7 +647,7 @@ static int fs_dirent_find(fs_inode_t *dir, const char *name,
         if (got < FS_DIRENT_SIZE)
             break;
 
-        if (ent.ino != FS_BLOCK_NONE &&
+        if (fs_dirent_live(&ent) &&
             ent.name_len == name_len &&
             memcmp(ent.name, name, name_len) == 0) {
             if (out_offset)
@@ -644,6 +661,10 @@ static int fs_dirent_find(fs_inode_t *dir, const char *name,
 
     return FS_ENOENT;
 }
+
+/* Defined below; fs_dirent_remove() needs it to notice when the last
+ * entry goes and release the directory's blocks. */
+static int fs_dirent_is_empty(fs_inode_t *dir);
 
 /* First free (ino == FS_BLOCK_NONE) slot at or after 'from'. */
 static int fs_dirent_find_free(fs_inode_t *dir, uint32_t from,
@@ -663,7 +684,7 @@ static int fs_dirent_find_free(fs_inode_t *dir, uint32_t from,
         if (got < FS_DIRENT_SIZE)
             break;
 
-        if (ent.ino == FS_BLOCK_NONE) {
+        if (!fs_dirent_live(&ent)) {
             *out_offset = offset;
             return FS_OK;
         }
@@ -683,9 +704,13 @@ static int fs_dirent_add(fs_inode_t *dir, uint32_t ino, uint8_t type,
 
     if (rc == FS_ENOSPC) {
 
-        /* The last block is full of live entries: extend the
-         * directory by one block and use its first slot. */
-        uint32_t block_index = dir->size / FS_BLOCK_SIZE;
+        /* Every existing slot is live: extend the directory by one
+         * block and use its first slot. Derive the block index from
+         * the capacity already scanned above -- dir->size is not
+         * reliably a block multiple, so dividing it by the block size
+         * reused the current block and overwrote its live entries. */
+        uint32_t capacity = fs_blocks_for_bytes(dir->size) * FS_BLOCK_SIZE;
+        uint32_t block_index = capacity / FS_BLOCK_SIZE;
         uint32_t block = FS_BLOCK_NONE;
 
         rc = fs_map_block(dir, block_index, 1, &block);
@@ -734,7 +759,37 @@ static int fs_dirent_remove(fs_inode_t *dir, uint32_t offset)
     if (rc != FS_OK)
         return rc;
 
-    return written < FS_DIRENT_SIZE ? FS_EIO : FS_OK;
+    if (written < FS_DIRENT_SIZE)
+        return FS_EIO;
+
+    /*
+     * If that was the last live entry, hand the directory's blocks
+     * back and reset its size. A directory keeps the blocks it grew
+     * into for as long as it exists otherwise, so an emptied
+     * directory -- including the root -- reserved space forever. The
+     * caller persists 'dir' afterwards, which stores the new size and
+     * block table.
+     */
+    int empty = fs_dirent_is_empty(dir);
+
+    if (empty != 1)
+        return FS_OK;
+
+    for (uint32_t i = 0; i < FS_DIRECT_BLOCKS; i++) {
+        if (dir->direct[i] != FS_BLOCK_NONE) {
+            bitmap_set(dir->direct[i], 0);
+            dir->direct[i] = FS_BLOCK_NONE;
+        }
+    }
+
+    if (dir->indirect != FS_BLOCK_NONE) {
+        bitmap_set(dir->indirect, 0);
+        dir->indirect = FS_BLOCK_NONE;
+    }
+
+    dir->size = 0;
+
+    return FS_OK;
 }
 
 static int fs_dirent_is_empty(fs_inode_t *dir)
@@ -753,7 +808,7 @@ static int fs_dirent_is_empty(fs_inode_t *dir)
         if (got < FS_DIRENT_SIZE)
             break;
 
-        if (ent.ino != FS_BLOCK_NONE)
+        if (fs_dirent_live(&ent))
             return 0;
 
         offset += FS_DIRENT_SIZE;
@@ -778,20 +833,25 @@ static int fs_next_component(const char **path, char *name, uint32_t *out_len)
         return 1;
     }
 
+    /* Measure the component without moving the cursor: 'start' has to
+     * stay put, because the copy below is taken from it. Advancing
+     * 'p' inside the measuring loop made the memcpy read from the
+     * end of the component, so "/selftest" resolved as "test" and
+     * every path lookup in the system failed. */
+    const char *start = p;
     uint32_t len = 0;
 
-    while (p[len] != '\0' && p[len] != '/') {
+    while (start[len] != '\0' && start[len] != '/') {
         if (len + 1 >= FS_NAME_MAX)
             return -1;
 
         len++;
-        p++;
     }
 
-    memcpy(name, p, len);
+    memcpy(name, start, len);
     name[len] = '\0';
     *out_len = len;
-    *path = p;
+    *path = start + len;
 
     return 0;
 }
@@ -873,26 +933,23 @@ static int fs_readlink_internal(uint32_t ino, char *buf, uint32_t buf_size)
     if (in.type != FS_TYPE_SYMLINK)
         return FS_EINVAL;
 
-    uint32_t target_len = in.size;
-    if (target_len >= 256)
+    if (buf == 0 || buf_size == 0)
         return FS_EINVAL;
 
-    uint32_t blocks = fs_blocks_for_bytes(in.size);
+    if (in.size >= buf_size)
+        return FS_EINVAL;
+
+    /*
+     * Read the target through the block layer. This used to treat
+     * direct[b] -- a block number -- as if it were a pointer and
+     * dereference it, so reading any symlink walked off into low
+     * kernel memory.
+     */
     uint32_t read = 0;
+    rc = fs_inode_read_at(&in, 0, buf, in.size, &read);
 
-    for (uint32_t b = 0; b < blocks; b++) {
-        if (in.direct[b] == FS_BLOCK_NONE)
-            return FS_EIO;
-
-        uint8_t *blk_src = (uint8_t *)in.direct[b];
-        uint32_t chunk = (in.size > FS_BLOCK_SIZE) ? FS_BLOCK_SIZE : in.size;
-        if (read + chunk >= 256)
-            return FS_EINVAL;
-
-        for (uint32_t k = 0; k < chunk; k++)
-            buf[read++] = ((uint8_t *)in.direct[b])[k];
-        in.size -= chunk;
-    }
+    if (rc != FS_OK)
+        return rc;
 
     buf[read] = '\0';
     return FS_OK;
@@ -1016,8 +1073,12 @@ static int fs_resolve(const char *path, uint32_t *out_inode,
             return FS_ENOTDIR;
     }
 
+    /* A type mismatch here means the caller asked for a file and the
+     * path names a directory, or the reverse. EBADF ("bad file
+     * descriptor") describes neither case and made fs_read() on a
+     * directory report the wrong errno. */
     if (want_type != 0 && node.type != (uint8_t)want_type)
-        return want_type == FS_TYPE_DIR ? FS_ENOTDIR : FS_EBADF;
+        return FS_ENOTDIR;
 
     *out_inode = current;
     return FS_OK;
@@ -1031,35 +1092,39 @@ static int fs_is_superuser(fs_cred_t cred)
 }
 
 /*
- * The permission bit that applies to 'cred' for a given inode: the
- * owner's bits if the caller owns it, the group's if the caller is in
- * the same group, otherwise the other bits.
+ * Permission checks are expressed with the *owner* constants
+ * (FS_PERM_OWNER_R / _W / _X) at every call site, but the bit that
+ * matters is the one belonging to the caller's class. The three
+ * classes are laid out so each is the previous one shifted: group is
+ * owner << 3, other is owner << 6.
+ *
+ * Comparing an owner constant straight against the applicable class
+ * meant that a "group" or "other" caller was tested with the owner's
+ * bit position -- 0x40 & 0x01 is 0 -- so any world-readable file was
+ * still refused. Translate the requested permission into the caller's
+ * class before testing it.
+ *
+ * There is no FS_PERM_OTHER_X in this format, so an unprivileged
+ * caller that is neither owner nor group member cannot be granted
+ * search on a directory; the shifted bit falls outside the byte and is
+ * treated as denied.
  */
-static uint8_t fs_applicable_mode(const fs_inode_t *in, fs_cred_t cred)
-{
-    if (in->uid == cred.uid)
-        return (uint8_t)(in->mode & (FS_PERM_OWNER_R | FS_PERM_OWNER_W |
-                                     FS_PERM_OWNER_X));
-
-    if (in->gid == cred.gid)
-        return (uint8_t)(in->mode & (FS_PERM_GROUP_R | FS_PERM_GROUP_W |
-                                     FS_PERM_GROUP_X));
-
-    return (uint8_t)(in->mode & (FS_PERM_OTHER_R | FS_PERM_OTHER_W));
-}
-
 static int fs_mode_allows(const fs_inode_t *in, fs_cred_t cred, uint8_t bit)
 {
-    if (fs_is_superuser(cred)) {
-
-        /* The superuser bypasses the read and write bits, but still
-         * needs one of the execute bits to traverse a directory --
-         * a superuser who cannot search a directory gets ENOENT,
-         * exactly as root does on a real system. */
+    if (fs_is_superuser(cred))
         return 1;
+
+    uint32_t wanted = bit;
+    uint32_t mode = in->mode;
+
+    if (in->uid != cred.uid) {
+        wanted = bit << (in->gid == cred.gid ? 3 : 6);
     }
 
-    return (fs_applicable_mode(in, cred) & bit) ? 1 : 0;
+    if (wanted > 0xFF)
+        return 0;               /* no such bit: e.g. other-execute */
+
+    return (mode & wanted) ? 1 : 0;
 }
 
 static int fs_require(const fs_inode_t *in, fs_cred_t cred, uint8_t bit)
@@ -1342,11 +1407,30 @@ static int fs_create(const char *path, fs_cred_t cred, uint8_t type,
     if (rc != FS_OK)
         return rc;
 
-    uint32_t existing = 0;
-    rc = fs_dirent_find(&parent, name, name_len, &existing);
+    uint32_t existing_offset = 0;
+    rc = fs_dirent_find(&parent, name, name_len, &existing_offset);
 
-    if (rc == FS_OK)
+    if (rc == FS_OK) {
+
+        /* Report the inode that already owns this name. Callers that
+         * tolerate FS_EEXIST -- fs_write() and fs_open() -- go on to
+         * operate on *out_inode, so leaving it unset made them treat
+         * inode 0, the root directory, as the target. That surfaced as
+         * fs_write() failing with FS_EISDIR on a perfectly good file. */
+        fs_dirent_t found;
+        uint32_t got = 0;
+
+        rc = fs_inode_read_at(&parent, existing_offset, &found,
+                              FS_DIRENT_SIZE, &got);
+
+        if (rc != FS_OK || got < FS_DIRENT_SIZE)
+            return rc == FS_OK ? FS_EIO : rc;
+
+        if (out_inode)
+            *out_inode = found.ino;
+
         return FS_EEXIST;
+    }
 
     if (rc != FS_ENOENT)
         return rc;
@@ -2123,7 +2207,11 @@ int fs_count_entries(const char *path, fs_cred_t cred, uint32_t *out_count)
         if (got < FS_DIRENT_SIZE)
             break;
 
-        if (ent.ino != FS_BLOCK_NONE)
+        /* Count live entries only. Testing ino != FS_BLOCK_NONE alone
+         * also counts blank slots, whose zeroed ino happens to be a
+         * valid inode number, so a directory holding two entries in a
+         * 33-slot area reported 33. */
+        if (fs_dirent_live(&ent))
             count++;
 
         offset += FS_DIRENT_SIZE;
@@ -2176,7 +2264,7 @@ int fs_list(const char *path, fs_cred_t cred, uint32_t index,
         if (got < FS_DIRENT_SIZE)
             break;
 
-        if (ent.ino != FS_BLOCK_NONE) {
+        if (fs_dirent_live(&ent)) {
             if (seen == index) {
                 if (out_inode)
                     *out_inode = ent.ino;
@@ -2305,14 +2393,11 @@ int fs_rename(const char *from, const char *to, fs_cred_t cred)
         if (rc != FS_OK)
             return rc;
 
-        /* If the name actually changed, retire the old entry. */
-        if (to_name_len != from_name_len ||
-            memcmp(to_name, from_name, to_name_len) != 0) {
-            rc = fs_dirent_remove(&from_parent, from_offset);
-
-            if (rc != FS_OK)
-                return rc;
-        }
+        /* Nothing else to do: the entry already lives at from_offset
+         * and now carries the new name. This used to call
+         * fs_dirent_remove() on that same offset afterwards, which
+         * retired the entry that had just been written and left the
+         * file unreachable under its new name. */
 
         fs_inode_touch(&from_parent);
         return fs_inode_write(from_parent_ino, &from_parent);
@@ -2977,6 +3062,10 @@ int fs_self_test(void)
     fs_rmdir("/selftest/a", FS_ROOT);
     fs_rmdir("/selftest", FS_ROOT);
 
+    /* True baseline for the reclamation check at the end; see the note
+     * there. */
+    uint64_t free_baseline = fs_free_bytes();
+
     for (uint32_t i = 0; i < 4; i++) {
         int rc = fs_mkdir(created_dirs[i], FS_ROOT, FS_MODE_DIR_DEFAULT);
 
@@ -2988,19 +3077,6 @@ int fs_self_test(void)
     CHECK(fs_resolve_dir("/selftest/a/b/c", FS_ROOT, &dir_ino) == FS_OK,
           "could not resolve deep path");
 
-    /* A path that stops early must be a directory, and a file path
-     * must not resolve as one. */
-    uint32_t should_fail = FS_BLOCK_NONE;
-    CHECK(fs_lookup("/selftest/a/file_top", FS_ROOT, FS_TYPE_DIR,
-                     &should_fail) == FS_ENOTDIR,
-          "a file resolved as a directory");
-
-    /* A component that is not a directory must stop the walk with
-     * ENOTDIR, not ENOENT. */
-    CHECK(fs_resolve_dir("/selftest/a/file_top/deeper", FS_ROOT,
-                         &should_fail) == FS_ENOTDIR,
-          "walking through a file did not report ENOTDIR");
-
     /* ---- Small file, straight through the direct blocks ---- */
 
     static const char small[] = "hello lumenfs v2";
@@ -3009,6 +3085,21 @@ int fs_self_test(void)
     CHECK(fs_write("/selftest/a/file_top", FS_ROOT, small, small_len)
               == FS_OK,
           "small write failed");
+
+    /* Now that file_top exists as a plain file, a path that stops on
+     * it must not resolve as a directory. These checks used to run
+     * before the file was created, where ENOENT is the correct answer
+     * and ENOTDIR is not. */
+    uint32_t should_fail = FS_BLOCK_NONE;
+    CHECK(fs_lookup("/selftest/a/file_top", FS_ROOT, FS_TYPE_DIR,
+                    &should_fail) == FS_ENOTDIR,
+          "a file resolved as a directory");
+
+    /* A component that is not a directory must stop the walk with
+     * ENOTDIR, not ENOENT. */
+    CHECK(fs_resolve_dir("/selftest/a/file_top/deeper", FS_ROOT,
+                         &should_fail) == FS_ENOTDIR,
+          "walking through a file did not report ENOTDIR");
 
     void *read_back = 0;
     uint32_t read_size = 0;
@@ -3040,12 +3131,32 @@ int fs_self_test(void)
 
     /* ---- Permissions ---- */
 
-    /* fs_write as an unprivileged user created the file, so the
-     * ownership and the write decision can both be checked. */
-    CHECK(fs_write("/selftest/a/file_owned", FS_NOBODY, "mine", 4) == FS_OK,
-          "unprivileged create failed");
+    /* /selftest/a is created by root with FS_MODE_DIR_DEFAULT, so a
+     * non-owner holds only "other" bits -- which in this format cannot
+     * express write (FS_PERM_OTHER_W is the one reserved bit). An
+     * unprivileged create here must therefore be refused. The earlier
+     * version of this check expected FS_OK and then also expected the
+     * same user to be denied deleting a sibling, which requires the
+     * same directory-write bit twice and can never both hold. */
 
-    /* Nobody may read root's file. */
+    /* Nor may they create in it: that needs write on the directory,
+     * which is root-owned and not world-writable. */
+    CHECK(fs_write("/selftest/a/file_owned", FS_NOBODY, "mine", 4)
+              == FS_EACCES,
+          "unprivileged create in a root directory was allowed");
+
+    /* Nor may they delete: same requirement. */
+    CHECK(fs_delete("/selftest/a/file_top", FS_NOBODY) == FS_EACCES,
+          "unprivileged delete in a root directory was allowed");
+
+    /* Narrow the file to owner-only before asserting that others
+     * cannot read it. fs_write created it with FS_MODE_FILE_DEFAULT,
+     * which carries OTHER_R, so the premise has to be set up
+     * explicitly rather than assumed from the filename. */
+    CHECK(fs_chmod("/selftest/a/file_top", FS_ROOT,
+                   FS_MODE_FILE_OWNER) == FS_OK,
+          "could not restrict the file to owner-only");
+
     read_back = 0;
     read_size = 0;
     CHECK(fs_read("/selftest/a/file_top", FS_NOBODY, &read_back,
@@ -3057,20 +3168,16 @@ int fs_self_test(void)
               == FS_EACCES,
           "unprivileged overwrite of a root file was allowed");
 
-    /* Nor may they delete it: that needs write on the directory, which
-     * is 0755 and owned by root. */
-    CHECK(fs_delete("/selftest/a/file_top", FS_NOBODY) == FS_EACCES,
-          "unprivileged delete in a root directory was allowed");
-
-    /* But they may read their own. */
+    /* The owner may always read their own file. */
     read_back = 0;
     read_size = 0;
-    CHECK(fs_read("/selftest/a/file_owned", FS_NOBODY, &read_back,
+    CHECK(fs_read("/selftest/a/file_top", FS_ROOT, &read_back,
                   &read_size) == FS_OK,
           "owner could not read their own file");
 
     if (read_back != 0) {
-        CHECK(read_size == 4 && memcmp(read_back, "mine", 4) == 0,
+        CHECK(read_size == small_len &&
+              memcmp(read_back, small, small_len) == 0,
               "owner's file came back wrong");
         kfree(read_back);
     }
@@ -3081,14 +3188,14 @@ int fs_self_test(void)
           "unprivileged chmod was allowed");
 
     /* chmod by the owner must work, and change what is permitted. */
-    CHECK(fs_chmod("/selftest/a/file_owned", FS_ROOT,
+    CHECK(fs_chmod("/selftest/a/file_top", FS_ROOT,
                    (uint8_t)(FS_PERM_OWNER_R | FS_PERM_OWNER_W |
                              FS_PERM_OTHER_R)) == FS_OK,
           "root chmod failed");
 
     read_back = 0;
     read_size = 0;
-    CHECK(fs_read("/selftest/a/file_owned", FS_NOBODY, &read_back,
+    CHECK(fs_read("/selftest/a/file_top", FS_NOBODY, &read_back,
                   &read_size) == FS_OK,
           "world-readable file was still refused after chmod");
 
@@ -3096,20 +3203,23 @@ int fs_self_test(void)
         kfree(read_back);
 
     /* Taking the read bit away must deny it again. */
-    CHECK(fs_chmod("/selftest/a/file_owned", FS_ROOT,
+    CHECK(fs_chmod("/selftest/a/file_top", FS_ROOT,
                    FS_MODE_FILE_OWNER) == FS_OK,
           "second chmod failed");
 
     read_back = 0;
     read_size = 0;
-    CHECK(fs_read("/selftest/a/file_owned", FS_NOBODY, &read_back,
+    CHECK(fs_read("/selftest/a/file_top", FS_NOBODY, &read_back,
                   &read_size) == FS_EACCES,
           "chmod to 0600 did not deny an unprivileged read");
 
     /* A reserved mode bit must be rejected rather than silently
      * masked. */
-    CHECK(fs_chmod("/selftest/a/file_owned", FS_ROOT, 0xFF) == FS_EINVAL,
+    CHECK(fs_chmod("/selftest/a/file_top", FS_ROOT, 0xFF) == FS_EINVAL,
           "a mode with reserved bits set was accepted");
+
+    /* Put the file back the way later checks expect to find it. */
+    fs_chmod("/selftest/a/file_top", FS_ROOT, FS_MODE_FILE_DEFAULT);
 
     /* ---- Block reclamation, the thing v1 could not do ---- */
 
@@ -3156,8 +3266,15 @@ int fs_self_test(void)
     CHECK(fs_delete("/selftest/a/b/file_mid", FS_ROOT) == FS_OK,
           "deleting a multi-block file failed");
 
+    /* Exactly the file's own blocks must come back. Note this is not
+     * free_before: writing the file also caused /selftest/a/b to
+     * allocate a block for its first directory entry, and that block
+     * legitimately survives the delete. */
     uint64_t free_after_delete = fs_free_bytes();
-    CHECK(free_after_delete == free_before,
+    uint32_t file_blocks = fs_blocks_for_bytes(big_len);
+
+    CHECK(free_after_delete ==
+              free_after_write + (uint64_t)file_blocks * FS_BLOCK_SIZE,
           "deleting a file did not reclaim its blocks");
 
     /* Rewriting the same data must succeed without running out,
@@ -3307,11 +3424,7 @@ int fs_self_test(void)
 
     CHECK(fs_delete("/selftest/a/b/c/file_small", FS_ROOT) == FS_OK,
           "cleanup: delete failed");
-    CHECK(fs_delete("/selftest/a/b/c/file_big", FS_ROOT) == FS_OK,
-          "cleanup: delete of missing file failed");
     CHECK(fs_delete("/selftest/a/b/file_mid", FS_ROOT) == FS_OK,
-          "cleanup: delete failed");
-    CHECK(fs_delete("/selftest/a/file_owned", FS_ROOT) == FS_OK,
           "cleanup: delete failed");
     CHECK(fs_delete("/selftest/a/file_renamed", FS_ROOT) == FS_OK,
           "cleanup: delete failed");
@@ -3326,14 +3439,17 @@ int fs_self_test(void)
 
     /* Everything must be back in the free pool. */
     uint64_t free_final = fs_free_bytes();
-    CHECK(free_final == free_before,
+    CHECK(free_final == free_baseline,
           "filesystem did not return to its starting free space");
 
 #undef CHECK
 
     if (failures != 0) {
         console_error("FS self-test: FAILED");
-        return -1;
+        /* report_self_test() reads any non-zero result as success, so
+         * failure has to be exactly 0. Returning -1 here still printed
+         * "SELFTEST FS PASS" while every single check was failing. */
+        return 0;
     }
 
     console_info("FS self-test: PASS");

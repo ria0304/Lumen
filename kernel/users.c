@@ -311,6 +311,17 @@ int users_run_self_test(void)
 {
     uint8_t d1[SHA256_DIGEST_SIZE];
     uint8_t d2[SHA256_DIGEST_SIZE];
+    int failures = 0;
+
+    /* Name each check so a failure is identifiable from the boot log
+     * instead of collapsing into one bare "SELFTEST USERS FAIL". */
+#define UCHECK(cond, msg)                                                  \
+    do {                                                                   \
+        if (!(cond)) {                                                     \
+            console_error("USERS self-test: " msg);                        \
+            failures++;                                                    \
+        }                                                                  \
+    } while (0)
 
     /* SHA-256("abc") known vector. */
     {
@@ -325,69 +336,66 @@ int users_run_self_test(void)
             0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
             0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad
         };
+        int match = 1;
         for (int i = 0; i < 32; i++) {
             if (d1[i] != expect[i])
-                return 0;
+                match = 0;
         }
+        UCHECK(match, "SHA-256 known-answer vector mismatch");
     }
 
     /* Same input, same hash. */
     {
         const char *abc = "abc";
         sha256(abc, 3, d2);
+        int same = 1;
         for (int i = 0; i < 32; i++) {
             if (d1[i] != d2[i])
-                return 0;
+                same = 0;
         }
+        UCHECK(same, "SHA-256 is not deterministic");
     }
 
     /* Different input, different hash. */
     {
         const char *abd = "abd";
         sha256(abd, 3, d2);
-        int same = 1;
+        int differs = 0;
         for (int i = 0; i < 32; i++) {
             if (d1[i] != d2[i])
-                same = 0;
+                differs = 1;
         }
-        if (same)
-            return 0;
+        UCHECK(differs, "different inputs produced the same digest");
     }
 
     /* Add + auth success. */
-    if (user_add("selftest", "pw", 1000) != 0)
-        return 0;
-
-    if (user_auth("selftest", "pw") < 0)
-        return 0;
+    UCHECK(user_add("selftest", "pw", 1000) == 0, "user_add failed");
+    UCHECK(user_auth("selftest", "pw") >= 0, "correct password rejected");
 
     /* Auth failure: wrong password. */
-    if (user_auth("selftest", "wrong") >= 0)
-        return 0;
+    UCHECK(user_auth("selftest", "wrong") < 0, "wrong password accepted");
 
     /* Auth failure: unknown user. */
-    if (user_auth("nosuchuser", "pw") >= 0)
-        return 0;
+    UCHECK(user_auth("nosuchuser", "pw") < 0, "unknown user authenticated");
 
     /* Duplicate add rejected. */
-    if (user_add("selftest", "other", 1001) == 0)
-        return 0;
+    UCHECK(user_add("selftest", "other", 1001) != 0, "duplicate user added");
 
     /* Persistence: save, clear, load, re-auth. */
-    if (!fs_is_mounted())
-        return 1;
+    if (fs_is_mounted()) {
+        UCHECK(users_save() == 0, "users_save failed");
 
-    if (users_save() != 0)
-        return 0;
+        for (int i = 0; i < MAX_USERS; i++)
+            u_tab[i].used = 0;
 
-    for (int i = 0; i < MAX_USERS; i++)
-        u_tab[i].used = 0;
+        UCHECK(users_load() == 0, "users_load failed");
+        UCHECK(user_auth("selftest", "pw") >= 0,
+               "user did not survive a save/load round trip");
+    } else {
+        console_warn("USERS self-test: no filesystem, skipping persistence");
+    }
 
-    if (users_load() != 0)
-        return 0;
+#undef UCHECK
 
-    if (user_auth("selftest", "pw") < 0)
-        return 0;
-
-    return 1;
+    return failures == 0;
 }

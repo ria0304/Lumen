@@ -59,8 +59,16 @@
 /* Directory entry size, padded so entries never straddle a sector. */
 #define FS_DIRENT_SIZE    32
 
-/* Longest name storable in a directory entry, NUL included. */
-#define FS_NAME_MAX       28
+/*
+ * Longest name storable in a directory entry, NUL included.
+ *
+ * Sized so fs_dirent_t is exactly FS_DIRENT_SIZE: a u32 plus two u8
+ * is 6 bytes, leaving 26 for the name. It used to be 28, which made
+ * the struct 36 bytes while entries are stored 32 at a time, so the
+ * tail of every long name was silently dropped on write and read back
+ * as stack garbage.
+ */
+#define FS_NAME_MAX       26
 
 #define FS_PATH_MAX       256
 
@@ -128,19 +136,36 @@ typedef struct {
 /*
  * An inode. Exactly FS_INODE_SIZE bytes so a whole number fits in
  * every sector.
+ *
+ * The layout is deliberate and sums to precisely 64 bytes: two bytes
+ * of u8, two u16, then 2 bytes of alignment padding before the first
+ * u32, three u32 scalars, FS_DIRECT_BLOCKS pointers and the indirect
+ * pointer. 8 + 12 + 40 + 4 == 64.
+ *
+ * There used to be a reserved[8] here, which pushed sizeof() to 72
+ * while FS_INODE_SIZE still said 64. FS_INODES_PER_SECTOR was then 8
+ * when only 7 actually fit in a 512-byte sector, so writing the
+ * eighth inode in a sector ran 64 bytes past the caller's buffer and
+ * smashed the stack. The assertions below fail the build if the
+ * struct and the declared size ever disagree again.
  */
 typedef struct {
     uint8_t  type;                /* FS_TYPE_* */
     uint8_t  mode;                /* FS_PERM_* */
     uint16_t uid;
     uint16_t gid;
+    /* 2 bytes of alignment padding here, ahead of 'size'. */
     uint32_t size;                /* bytes, for files */
     uint32_t mtime;               /* Unix epoch seconds */
     uint32_t flags;               /* reserved, must be 0 */
     uint32_t direct[FS_DIRECT_BLOCKS];
     uint32_t indirect;            /* FS_BLOCK_NONE when unused */
-    uint8_t  reserved[8];
 } fs_inode_t;
+
+_Static_assert(sizeof(fs_inode_t) == FS_INODE_SIZE,
+               "fs_inode_t must be exactly FS_INODE_SIZE bytes");
+_Static_assert(FS_SECTOR_SIZE % FS_INODE_SIZE == 0,
+               "FS_INODE_SIZE must divide a whole number of sectors");
 
 /*
  * A directory entry. Directories are arrays of these; nothing else
@@ -156,6 +181,13 @@ typedef struct {
     uint8_t  name_len;            /* bytes in name, excluding NUL */
     char     name[FS_NAME_MAX];   /* NUL terminated */
 } fs_dirent_t;
+
+_Static_assert(sizeof(fs_dirent_t) == FS_DIRENT_SIZE,
+               "fs_dirent_t must be exactly FS_DIRENT_SIZE bytes");
+_Static_assert(FS_SECTOR_SIZE % FS_DIRENT_SIZE == 0,
+               "FS_DIRENT_SIZE must divide a whole number of sectors");
+_Static_assert(sizeof(fs_superblock_t) == FS_SECTOR_SIZE,
+               "fs_superblock_t must be exactly one sector");
 
 /* ---- Shared geometry helpers --------------------------------------- */
 
