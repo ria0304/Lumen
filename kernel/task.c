@@ -870,7 +870,14 @@ int task_create_user_elf(const Elf32_Ehdr *ehdr, const void *buffer, uint32_t si
         return -1;
     }
 
-    if (paging_map_in_directory(directory, TASK_RING3_STACK_VA - PAGE_SIZE, stack_phys,
+    /*
+     * Map the stack at TASK_RING3_STACK_VA. It used to go at
+     * TASK_RING3_STACK_VA - PAGE_SIZE, which is 0x01000000 -- the
+     * very address the ELF's code segment is mapped at. The stack
+     * therefore replaced the loaded code, and the task resumed into a
+     * page of zeros.
+     */
+    if (paging_map_in_directory(directory, TASK_RING3_STACK_VA, stack_phys,
             PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
         frame_free(stack_phys);
         return -1;
@@ -898,11 +905,14 @@ int task_create_user_elf(const Elf32_Ehdr *ehdr, const void *buffer, uint32_t si
     tasks[i].context.eip = ehdr->e_entry;
     tasks[i].context.esp = TASK_RING3_STACK_TOP;
 
+    /* Enter at the program's own entry point. Hardcoding
+     * TASK_RING3_CODE_VA ignores e_entry, which is wrong for any
+     * image not linked at the start of its text segment. */
     tasks[i].switch_esp =
         task_prepare_user_stack(
             tasks[i].stack_base,
             tasks[i].stack_size,
-            TASK_RING3_CODE_VA,
+            ehdr->e_entry,
             TASK_RING3_STACK_TOP
         );
 

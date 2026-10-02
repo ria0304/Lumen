@@ -9,6 +9,7 @@
 #include "privilege.h"
 #include "scheduler.h"
 #include "task.h"
+#include "loader.h"
 #include "uaccess.h"
 
 /*
@@ -28,6 +29,8 @@ extern uint8_t ring3_exec_entry[];
 extern uint32_t ring3_exec_size;
 extern uint8_t ring3_execprog[];
 extern uint32_t ring3_execprog_len;
+extern const unsigned char lumen_elfprog[];
+extern const unsigned int lumen_elfprog_len;
 extern uint8_t ring3_syscalls_entry[];
 extern uint32_t ring3_syscalls_size;
 
@@ -697,6 +700,91 @@ int ring3_syscalls_run_self_test(void)
           "the task was disturbed by the failed syscalls");
 
     task_wait((uint32_t)id);
+
+#undef CHECK
+
+    return failures == 0;
+}
+
+/*
+ * The ELF loader, end to end.
+ *
+ * Unlike RING3EXE, which hands the loader raw bytes, this stages a
+ * genuine ELF32 executable built by a real toolchain, so the header
+ * parsing and PT_LOAD mapping are actually exercised. The program
+ * writes /tmp/elf.ok and exits; nothing in the kernel creates that
+ * file, so finding it proves the image was parsed, mapped at its own
+ * virtual address, entered at CPL 3, and able to do file I/O.
+ */
+int ring3_elf_run_self_test(void)
+{
+    int failures = 0;
+
+#define CHECK(cond, msg)                                                   \
+    do {                                                                   \
+        if (!(cond)) {                                                     \
+            console_error("RING3 self-test: " msg);                         \
+            failures++;                                                    \
+        }                                                                  \
+    } while (0)
+
+    static const char prog_path[] = R3_DIR "/prog.elf";
+    static const char out_path[]  = R3_DIR "/elf.ok";
+
+    fs_mkdir(R3_DIR, FS_ROOT, FS_MODE_DIR_DEFAULT);
+    fs_delete(prog_path, FS_ROOT);
+    fs_delete(out_path, FS_ROOT);
+
+    CHECK(fs_write(prog_path, FS_ROOT, lumen_elfprog, lumen_elfprog_len)
+              == FS_OK,
+          "could not stage the ELF");
+
+    int id = loader_spawn_elf(prog_path);
+
+    CHECK(id >= 0, "the ELF loader refused a valid executable");
+
+    if (id >= 0) {
+        uint32_t start = timer_ticks;
+
+        for (;;) {
+            const task_t *t = task_get((uint32_t)id);
+
+            if (t == 0 || t->state == TASK_TERMINATED)
+                break;
+
+            if (timer_ticks - start > 3000) {
+                console_error("RING3 self-test: the ELF program never "
+                              "finished");
+                break;
+            }
+
+            __asm__ volatile ("hlt");
+        }
+
+        const task_t *done = task_get((uint32_t)id);
+
+        CHECK(done != 0 && done->state == TASK_TERMINATED,
+              "the ELF program did not terminate");
+
+        void *back = 0;
+        uint32_t size = 0;
+
+        CHECK(fs_read(out_path, FS_ROOT, &back, &size) == FS_OK,
+              "the ELF program wrote no output file");
+        CHECK(size == 7, "the ELF output file has the wrong size");
+
+        if (back != 0) {
+            CHECK(memcmp(back, "ELFDONE", 7) == 0,
+                  "the ELF program wrote the wrong contents");
+
+            kfree(back);
+        }
+
+        task_wait((uint32_t)id);
+    }
+
+    fs_delete(prog_path, FS_ROOT);
+    fs_delete(out_path, FS_ROOT);
 
 #undef CHECK
 

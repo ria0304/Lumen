@@ -37,7 +37,8 @@ Ring 3 programs fault deliberately and must be retired without taking the
 machine down, and `fork()` is checked for real address-space isolation (the
 child overwrites an inherited page; the parent's copy must be untouched),
 `exec()` replaces a Ring 3 image with a program read from LumenFS whose
-output the kernel then verifies, and a dedicated probe drives the syscall
+output the kernel then verifies, an ELF executable built by a real toolchain is
+loaded through the ELF header path (finding two bugs in it),, and a dedicated probe drives the syscall
 dispatcher's error paths -- bad signal numbers, out-of-range descriptors and
 pids, kernel pointers passed as signal handlers, and unimplemented syscall
 numbers.
@@ -81,7 +82,7 @@ numbers.
 | Syscalls | Implemented (partial) | 25 numbers defined in `syscall.h` (`SYS_GETPID` .. `SYS_RECV`) and dispatched in a `switch`. Some are thin: `SYS_SOCKET` returns a fixed loopback fd |
 | ATA driver | Implemented | PIO reads/writes, used by LumenFS. DMA is compiled out by default -- see limitations |
 | LumenFS v2 | Implemented | 1 KiB blocks, inodes, directories, direct + indirect blocks, symlinks, hard links, Unix-style permissions and `chmod`/`chown`. v1 images are rejected at mount. See [Storage](#storage) |
-| ELF loader | Implemented | `loader.c` starts a flat binary or an ELF executable from LumenFS as a Ring 3 task. The flat-binary path is covered end to end by the RING3EXE self-test; the ELF header path is not |
+| ELF loader | Implemented | `loader.c` starts a flat binary or an ELF executable from LumenFS as a Ring 3 task. Both paths are covered end to end (RING3EXE, RING3ELF); the ELF test stages a real toolchain-produced ELF |
 | Shell | Implemented | Line editor plus commands for tasks, storage, users, settings, networking, and demos. `help` output lags the real command set |
 | Users | Implemented | `users.c`; `sudo`, `useradd`, `login` |
 | Settings | Implemented | `settings.c`; persisted to LumenFS |

@@ -29,4 +29,7 @@ int ring3_exec_run_self_test(void);
 /* Syscall coverage, especially the dispatcher error paths. */
 int ring3_syscalls_run_self_test(void);
 
+/* The ELF loader: a real ELF staged on LumenFS, run and verified. */
+int ring3_elf_run_self_test(void);
+
 #endif
