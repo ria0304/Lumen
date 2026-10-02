@@ -59,7 +59,7 @@ int settings_save(void) {
         buf[pos++] = '\n';
     }
     buf[pos] = 0;
-    fs_mkdir("/etc", FS_ROOT, 0755);
+    fs_mkdir("/etc", FS_ROOT, FS_MODE_DIR_DEFAULT);
     int rc = fs_write("/etc/settings", FS_ROOT, buf, pos);
     kfree(buf);
     return rc == FS_OK ? 0 : -1;

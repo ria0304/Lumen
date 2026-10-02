@@ -21,7 +21,7 @@ KERNEL_HDRS = $(wildcard kernel/*.h)
 KERNEL_OBJS = $(BUILD)/entry.o $(BUILD)/usermode.o $(BUILD)/isr.o $(BUILD)/gdt_flush.o $(BUILD)/gdt.o $(BUILD)/tss_load.o $(BUILD)/tss.o \
               $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/serial.o $(BUILD)/idt.o $(BUILD)/pic.o $(BUILD)/pit.o $(BUILD)/keyboard.o $(BUILD)/heap.o \
               $(BUILD)/line_editor.o $(BUILD)/shell.o $(BUILD)/task.o $(BUILD)/scheduler.o $(BUILD)/task_demo.o $(BUILD)/paging.o $(BUILD)/frame.o $(BUILD)/ring3.o $(BUILD)/syscall.o \
-              $(BUILD)/ata.o $(BUILD)/rtc.o $(BUILD)/kmem.o $(BUILD)/fs.o $(BUILD)/loader.o $(BUILD)/gui.o $(BUILD)/settings.o $(BUILD)/users.o $(BUILD)/net.o $(BUILD)/pkg.o $(BUILD)/proc.o $(BUILD)/klog.o $(BUILD)/cron.o $(BUILD)/gfx.o $(BUILD)/nic.o $(BUILD)/uaccess.o
+              $(BUILD)/ata.o $(BUILD)/rtc.o $(BUILD)/kmem.o $(BUILD)/fs.o $(BUILD)/loader.o $(BUILD)/gui.o $(BUILD)/settings.o $(BUILD)/users.o $(BUILD)/net.o $(BUILD)/pkg.o $(BUILD)/proc.o $(BUILD)/klog.o $(BUILD)/cron.o $(BUILD)/gfx.o $(BUILD)/nic.o $(BUILD)/uaccess.o $(BUILD)/sha256.o
 
 KERNEL_ELF = $(BUILD)/kernel.elf
 KERNEL_BIN = $(BUILD)/kernel.bin
@@ -117,6 +117,11 @@ mkfs: $(MKFS)
 # on its own once the boot self-tests are done, so this is fast and needs
 # no timeout. A fresh disk is used every time so results don't depend on
 # whatever the last interactive session left behind.
+#
+# The fresh disk is formatted with mkfs before boot. Without that the
+# kernel mounts an unformatted volume, skips the whole LumenFS
+# self-test, and 'make test' reports success while testing none of
+# the filesystem.
 # ---------------------------------------------------------------------------
 # The sub-make runs with BUILD=$(BUILD_TEST), so its $(DISK) target --
 # $(BUILD)/disk.img -- is exactly this path. No separate rule is
@@ -124,15 +129,17 @@ mkfs: $(MKFS)
 TEST_DISK = $(BUILD_TEST)/disk.img
 TEST_LOG = $(BUILD_TEST)/boot.log
 .PHONY: test
-test:
+test: $(MKFS)
 	@rm -f $(TEST_DISK)
 	@$(MAKE) --no-print-directory BUILD=$(BUILD_TEST) \
 	   CFLAGS="$(CFLAGS) -DLUMEN_AUTOEXIT" \
 	   $(BUILD_TEST)/lumen.img $(TEST_DISK)
 	@echo "  TEST    booting headless, capturing serial output..."
+	@./$(MKFS) $(TEST_DISK) 8192 >/dev/null
 	@timeout 60 qemu-system-i386 -display none -serial stdio \
-	    -boot order=c \
-	    -drive file=$(BUILD_TEST)/lumen.img,format=raw,if=ide \
+	    -boot order=a \
+	    -drive file=$(BUILD_TEST)/lumen.img,format=raw,if=floppy \
+	    -drive file=$(TEST_DISK),format=raw,if=ide \
 	    -device isa-debug-exit \
 	    < /dev/null > $(TEST_LOG) 2>&1; true
 	@grep -E 'SELFTEST' $(TEST_LOG) || true

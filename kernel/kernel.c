@@ -19,6 +19,7 @@
 #include "gui.h"
 #include "settings.h"
 #include "users.h"
+#include "sha256.h"
 #include "net.h"
 #include "pkg.h"
 #include "proc.h"

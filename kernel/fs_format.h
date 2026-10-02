@@ -72,7 +72,10 @@
 
 /*
  * Permission bits, in the usual Unix arrangement. Stored as one
- * byte; the top three bits are reserved and must be zero.
+ * byte; FS_PERM_OTHER_W is the single reserved bit, which must be
+ * zero. Every other bit is a live permission, including
+ * FS_PERM_OTHER_R -- a narrower mask silently drops world-read
+ * from FS_MODE_DIR_DEFAULT.
  */
 #define FS_PERM_OWNER_R  0x01
 #define FS_PERM_OWNER_W  0x02
@@ -83,8 +86,8 @@
 #define FS_PERM_OTHER_R  0x40
 #define FS_PERM_OTHER_W  0x80
 
-/* The only execute bit there is room for in the mode byte. */
-#define FS_MODE_MASK     0x3F
+/* All defined permission bits except the reserved OTHER_W. */
+#define FS_MODE_MASK     0x7F
 
 /* Convenience for a file only its owner may touch. */
 #define FS_MODE_FILE_OWNER (FS_PERM_OWNER_R | FS_PERM_OWNER_W)
