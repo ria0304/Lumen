@@ -275,15 +275,21 @@ identity exists so the permission checks can be tested.
     ring ran past its own allocation;
   - ARP frames were sent 42 bytes long, below the 60-byte Ethernet
     minimum, so they were dropped before reaching the peer;
-  - register 0x10 (TxDescriptorStart) was being written with a length;
-    it is the base address of the descriptor array;
+  - register 0x10 (TxDescriptorStart) was being written with a frame
+    length; it is the physical base of the descriptor array, so a
+    length there told the device its descriptors lived at physical
+    address 60;
   - the transmit was never kicked via the Tx Command register (0x50).
 
   What is still unexplained, from a host-side frame capture: with the
-  descriptor correctly filled, TxCommand written and the interrupt mask
-  unmasked, the transmit still never completes (no TOK) and nothing
-  appears on the wire. The receive ring is likewise never populated.
-  The remaining work is to drive this device model correctly.
+  descriptor ring correctly built and filled, TxDescriptorStart set,
+  TSAD set, TxCommand written and the interrupt mask unmasked, every
+  register reads back correctly -- and the transmit still never
+  completes (no TOK) and nothing appears on the wire. The receive ring
+  is likewise never populated. Ruled out along the way: the descriptor
+  OWNER bit, toggling TxEnable to force a fresh edge, and the
+  start/command ordering. The remaining work is to drive this device
+  model correctly.
 - **`SYS_WAIT` does not block.** It reaps an already-exited child and
   returns -1 otherwise, so a program that forks must keep yielding and
   retrying until the timer actually switches to the child.
