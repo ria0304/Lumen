@@ -1,0 +1,180 @@
+; Ring 3 file-I/O self-test.
+;
+; This is ordinary user-mode code: it runs at CPL 3 and is the only
+; thing in the suite that pushes the whole stack together --
+; paging, uaccess pointer validation, the fd table, and LumenFS --
+; in a single end-to-end exercise. Everything it learns is recorded
+; into fixed user addresses, which the kernel reads back once the
+; task has terminated.
+;
+; Syscall convention (see kernel/syscall.c):
+;     eax = number, ebx = arg1, edx = arg2, ecx = arg3
+;     result comes back in eax; errors come back as -1.
+
+BITS 32
+
+global ring3_io_entry
+global ring3_io_size
+
+; User addresses. These sit at the very bottom of the stack page
+; (0x01001000), well below where the stack pointer starts
+; (0x01002000), so a shallow program cannot collide with them.
+PATH_ADDR     equ 0x01001000
+DATA_ADDR     equ 0x01001040
+RES_BASE      equ 0x010010C0
+
+RES_OPEN1     equ RES_BASE + 0x00   ; first open, expect >= 0
+RES_WRITE     equ RES_BASE + 0x04   ; bytes written, expect DATA_LEN
+RES_CLOSE1    equ RES_BASE + 0x08   ; close, expect 0
+RES_OPEN2     equ RES_BASE + 0x0C   ; reopen, expect >= 0
+RES_READ      equ RES_BASE + 0x10   ; bytes read, expect DATA_LEN
+RES_CMP       equ RES_BASE + 0x14   ; data compared equal, expect 1
+RES_BADWRITE  equ RES_BASE + 0x18   ; kernel-pointer write, expect -1
+RES_BADREAD   equ RES_BASE + 0x1C   ; kernel-pointer read, expect -1
+RES_BADOPEN   equ RES_BASE + 0x20   ; kernel-pointer path, expect -1
+RES_GETPID    equ RES_BASE + 0x24   ; own pid, expect >= 1
+RES_YIELD     equ RES_BASE + 0x28   ; yield, expect 0
+RES_CLOSE2    equ RES_BASE + 0x2C   ; close again, expect 0
+RES_REOPEN_RD equ RES_BASE + 0x30   ; read-only open for a 2nd pass
+RES_SHORTREAD equ RES_BASE + 0x34   ; read past EOF, expect 0
+
+DATA_LEN      equ 8
+
+; Flags, matching fs.h.
+O_RDONLY      equ 0x00
+O_RDWR        equ 0x02
+O_CREAT       equ 0x04
+O_TRUNC       equ 0x08
+
+; A kernel address: far above USER_ADDR_MAX, so uaccess must reject
+; any attempt to pass it.
+KERNEL_BAD    equ 0x00100000
+
+SYS_EXIT      equ 3
+SYS_GETPID    equ 1
+SYS_YIELD     equ 2
+SYS_CLOSE     equ 17
+SYS_OPEN      equ 18
+SYS_READ      equ 19
+SYS_WRITE     equ 20
+
+; call_sys: eax=number, ebx=arg1, edx=arg2, ecx=arg3 -> eax=result
+%macro call_sys 4
+    mov eax, %1
+    mov ebx, %2
+    mov edx, %3
+    mov ecx, %4
+    int 0x80
+%endmacro
+
+; Store eax at a fixed user address (absolute moffs form).
+%macro store_res 1
+    mov dword [%1], eax
+%endmacro
+
+section .text
+ring3_io_entry:
+    ; ---- the file name, and the payload -------------------------
+    ; "/tmp/io.txt", built a word at a time (little-endian).
+    mov dword [PATH_ADDR],     0x706D742F     ; "/tmp"
+    mov dword [PATH_ADDR + 4], 0x2E6F692F     ; "/io."
+    mov dword [PATH_ADDR + 8], 0x00747874     ; "txt\0"
+
+    mov dword [DATA_ADDR],     0x44434241     ; "ABCD"
+    mov dword [DATA_ADDR + 4], 0x48474645     ; "EFGH"
+
+    ; ---- 1. create + write --------------------------------------
+    call_sys SYS_OPEN, PATH_ADDR, O_RDWR | O_CREAT | O_TRUNC, 0
+    store_res RES_OPEN1
+
+    cmp eax, 0
+    jl .fail
+
+    mov esi, eax                   ; keep the fd in esi
+
+    call_sys SYS_WRITE, esi, DATA_ADDR, DATA_LEN
+    store_res RES_WRITE
+
+    call_sys SYS_CLOSE, esi, 0, 0
+    store_res RES_CLOSE1
+
+    ; ---- 2. reopen and read it back ------------------------------
+    call_sys SYS_OPEN, PATH_ADDR, O_RDONLY, 0
+    store_res RES_OPEN2
+
+    cmp eax, 0
+    jl .fail
+
+    mov edi, eax
+
+    ; Overwrite the buffer with a pattern that cannot match, so a
+    ; read that writes nothing at all still fails the comparison.
+    mov dword [DATA_ADDR], 0xFFFFFFFF
+
+    call_sys SYS_READ, edi, DATA_ADDR, DATA_LEN
+    store_res RES_READ
+
+    ; Compare the first 4 bytes against "ABCD".
+    mov eax, [DATA_ADDR]
+    cmp eax, 0x44434241
+    jne .cmp_bad
+    mov eax, [DATA_ADDR + 4]
+    cmp eax, 0x48474645
+    jne .cmp_bad
+
+    mov dword [RES_CMP], 1
+    jmp .after_cmp
+
+.cmp_bad:
+    mov dword [RES_CMP], 0
+
+.after_cmp:
+
+    ; A read at EOF must report 0, not stale data or an error.
+    call_sys SYS_READ, edi, DATA_ADDR, DATA_LEN
+    store_res RES_SHORTREAD
+
+    call_sys SYS_CLOSE, edi, 0, 0
+    store_res RES_CLOSE2
+
+    ; ---- 3. the kernel must refuse kernel pointers ---------------
+    call_sys SYS_WRITE, 0, KERNEL_BAD, 4
+    store_res RES_BADWRITE
+
+    call_sys SYS_READ, 0, KERNEL_BAD, 4
+    store_res RES_BADREAD
+
+    call_sys SYS_OPEN, KERNEL_BAD, O_RDONLY, 0
+    store_res RES_BADOPEN
+
+    ; ---- 4. the cheap syscalls -----------------------------------
+    call_sys SYS_GETPID, 0, 0, 0
+    store_res RES_GETPID
+
+    call_sys SYS_YIELD, 0, 0, 0
+    store_res RES_YIELD
+
+    ; ---- 5. hand over a known exit status ------------------------
+    call_sys SYS_EXIT, 0, 0, 0
+    jmp .fail_hang
+
+.fail:
+    call_sys SYS_EXIT, 1, 0, 0
+
+.fail_hang:
+    ; If exit ever stops working the scheduler would run us off the
+    ; end, so park here instead. The kernel times the wait out.
+    jmp .fail_hang
+
+ring3_io_entry_end:
+
+; The kernel passes ring3_io_size as the code size, which is exactly
+; the number of bytes to copy into the Ring 3 page. It has to live in
+; a section with real storage: as an `equ` it is an absolute symbol
+; with no address, and reading it from C yields garbage -- which made
+; task_create_user_program() reject the code as too large.
+section .data
+align 4
+global ring3_io_size
+ring3_io_size:
+    dd ring3_io_entry_end - ring3_io_entry

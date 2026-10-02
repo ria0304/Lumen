@@ -193,6 +193,44 @@ int copy_string_from_user(
     return -1;
 }
 
+int uaccess_read_u32(
+    uint32_t directory_physical,
+    uint32_t uaddr,
+    uint32_t *out
+)
+{
+    if (out == 0)
+        return -1;
+
+    /* Validate first: a rejected read must be distinguishable from a
+     * value of 0, which uaccess_read_word()'s caller cannot do. */
+    if (uaccess_check(directory_physical, uaddr, 4, 0) != 0)
+        return -1;
+
+    uint8_t *src = uaccess_byte(directory_physical, uaddr, 0);
+
+    if (src == 0)
+        return -1;
+
+    /* Assembled byte by byte: the mapping is only guaranteed valid for
+     * the single byte we asked about, and the CPU cannot be relied on
+     * to fetch all four within one page. */
+    uint32_t value = 0;
+
+    for (uint32_t i = 0; i < 4; i++) {
+        uint8_t *b = uaccess_byte(directory_physical, uaddr + i, 0);
+
+        if (b == 0)
+            return -1;
+
+        value |= ((uint32_t)*b) << (i * 8);
+    }
+
+    *out = value;
+
+    return 0;
+}
+
 /*
  * Live probe, executed in Ring 3 by a real user task:
  *

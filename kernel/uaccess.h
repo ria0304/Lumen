@@ -64,6 +64,17 @@ int copy_string_from_user(
     uint32_t directory_physical
 );
 
+/*
+ * Read one 32-bit word from a validated user range. Returns 0 on
+ * success and -1 when the address is not readable, so a caller can
+ * never mistake a rejected read for a value.
+ */
+int uaccess_read_u32(
+    uint32_t directory_physical,
+    uint32_t uaddr,
+    uint32_t *out
+);
+
 /* Boot self-test: unit checks plus a live Ring 3 probe task. */
 int syscall_run_self_test(void);
 

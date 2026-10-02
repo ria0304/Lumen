@@ -2460,6 +2460,14 @@ int fs_open(const char *path, fs_cred_t cred, uint32_t flags,
                       ? 1 : 0;
     int reading = (flags & (FS_OPEN_READ | FS_OPEN_WRITE)) ? 1 : 0;
 
+    /*
+     * No bits at all is the conventional O_RDONLY (FS_OPEN_READ is
+     * 0x01, so callers that pass plain 0 for "read it" got every
+     * access flag false and were rejected with FS_EINVAL).
+     */
+    if (!creating && !writing && !reading && flags == 0)
+        reading = 1;
+
     if (!creating && !writing && !reading)
         return FS_EINVAL;
 

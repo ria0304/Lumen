@@ -28,6 +28,7 @@
 #include "gfx.h"
 #include "nic.h"
 #include "uaccess.h"
+#include "ring3test.h"
 #include "version.h"
 #include "serial.h"
 
@@ -404,8 +405,17 @@ void kmain(void)
      */
     if (fs_is_mounted()) {
         report_self_test("FS", fs_self_test());
+
+        /*
+         * Runs after the filesystem self-test, and only once there is
+         * a disk to work on: this one drives real file I/O from a
+         * Ring 3 task, so it exercises paging, uaccess, the fd table
+         * and LumenFS together.
+         */
+        report_self_test("RING3IO", ring3_io_run_self_test());
     } else {
         terminal_write("SELFTEST FS SKIP (unformatted)\n");
+        terminal_write("SELFTEST RING3IO SKIP (unformatted)\n");
         console_warn("FS: run 'format' to initialize the disk");
     }
 
