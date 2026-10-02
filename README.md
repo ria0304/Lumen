@@ -289,11 +289,15 @@ identity exists so the permission checks can be tested.
 - **The shell is keyboard-only.** It reads the PS/2 keyboard, not COM1, so piping commands into a
   headless QEMU session does not reach the prompt. `make test` drives the kernel through its
   self-tests instead.
-- **ATA DMA is disabled by default (`LUMEN_ATA_USE_DMA=0`).** The DMA path completes without
-  reporting an error but leaves the destination buffer holding the wrong bytes, which made every
-  filesystem read silently return garbage. Its spin-wait now reports failure so the PIO fallback
-  engages, and the missing PCI Bus Master Enable is set, but the path is still not trusted for
-  correctness. PIO is slower and correct.
+- **ATA DMA is disabled by default (`LUMEN_ATA_USE_DMA=0`).** DMA reads do not reliably match
+  programmed I/O: with DMA on, the superblock comes back as zeros, the filesystem cannot mount,
+  and the controller is left such that later PIO reads return the same wrong bytes. Its spin-wait
+  now reports failure so the PIO fallback engages, and the missing PCI Bus Master Enable is set, so
+  the remaining fault is narrow but real. The ATA self-test now compares DMA against PIO directly
+  and fails with the offending address and offset, so enabling DMA is a red build rather than a
+  silent one. Current finding: statically placed buffers match, a stack buffer diverges partway
+  through the sector (observed at 0x0008FB98, first difference at byte 236). PIO is slower and
+  correct.
 - **Build warnings.** Expected and non-fatal: executable-stack and RWX-segment linker warnings from
   `tss_load.o`, plus assorted `-Wmisleading-indentation` and unused-parameter warnings in
   `shell.c`, `ata.c` and `task.c`.

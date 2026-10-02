@@ -14,6 +14,12 @@
 #include "frame.h"
 #include "paging.h"
 
+static void print_hex8(uint8_t v){
+    const char h[]="0123456789ABCDEF";
+    terminal_putchar(h[v>>4]);
+    terminal_putchar(h[v&0xF]);
+}
+
 static void print_hex32(uint32_t value);
 
 /* Primary ATA bus, I/O port block. */
@@ -804,20 +810,14 @@ static int ata_dma_write(uint32_t lba, uint8_t count, const void *buffer)
     return 0;
 }
 
-int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer)
+/* Programmed I/O read, bypassing DMA entirely. */
+static int ata_pio_read(uint32_t lba, uint8_t count, void *buffer)
 {
     if (buffer == 0)
         return -1;
 
     if (ata_check_range(lba, count) != 0)
         return -1;
-
-    /* Try DMA first if supported */
-    if (dma_supported && dma_prdt != 0) {
-        if (ata_dma_read(lba, count, buffer) == 0)
-            return 0;
-        console_warn("DMA read failed, falling back to PIO");
-    }
 
     if (ata_select_lba(lba, count) != 0)
         return -1;
@@ -838,6 +838,24 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer)
     }
 
     return 0;
+}
+
+int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer)
+{
+    if (buffer == 0)
+        return -1;
+
+    if (ata_check_range(lba, count) != 0)
+        return -1;
+
+    /* Try DMA first if supported */
+    if (dma_supported && dma_prdt != 0) {
+        if (ata_dma_read(lba, count, buffer) == 0)
+            return 0;
+        console_warn("DMA read failed, falling back to PIO");
+    }
+
+    return ata_pio_read(lba, count, buffer);
 }
 
 int ata2_read_sectors(uint32_t lba, uint8_t count, void *buffer)
@@ -1029,6 +1047,85 @@ int ata_run_self_test(void)
     if (ata_read_sectors(0, 1, sector) != 0) {
         console_error("ATA self-test: primary read of LBA 0 failed");
         return 0;
+    }
+
+    /*
+     * Whatever path served that read must have delivered the same
+     * bytes a plain programmed I/O read would.
+     *
+     * When DMA is enabled this compares the two directly, and again with
+     * a buffer on the stack because that is what the filesystem uses
+     * for its superblock. The DMA path used to report success while
+     * leaving the buffer untouched, so every filesystem read returned
+     * whatever happened to be in memory -- silently, with no error
+     * anywhere. Checking here turns that into a visible failure.
+     *
+     * Status with LUMEN_ATA_USE_DMA=1: a statically placed buffer
+     * matches PIO, but a stack buffer diverges partway through the
+     * sector (observed at 0x0008FB98, first difference at byte 236).
+     * The failure is left in place deliberately, so enabling DMA is a
+     * red build rather than a silent one.
+     */
+    if (dma_supported && dma_prdt != 0) {
+        static uint8_t via_pio[512];
+        static uint8_t via_dma[512];
+
+        /* One side must be a real PIO read: ata_read_sectors() would
+         * have taken the DMA path too, making the comparison
+         * vacuous. */
+        if (ata_pio_read(0, 1, via_pio) != 0 ||
+            ata_read_sectors(0, 1, via_dma) != 0) {
+
+            console_error("ATA self-test: DMA comparison read failed");
+            return 0;
+        }
+
+        for (uint32_t i = 0; i < 512; i++) {
+            if (via_pio[i] != via_dma[i]) {
+                console_error("ATA self-test: DMA read differs from PIO");
+                terminal_write("  first difference at byte ");
+                terminal_write_u32(i);
+                terminal_write(", PIO=");
+                print_hex8(via_pio[i]);
+                terminal_write(" DMA=");
+                print_hex8(via_dma[i]);
+                terminal_write("\n");
+                return 0;
+            }
+        }
+
+        /*
+         * Repeat with a buffer on the stack. The filesystem reads its
+         * superblock into a stack local, so a path that only works for
+         * statically placed buffers would pass the check above and
+         * still leave the filesystem unable to mount.
+         */
+        {
+            uint8_t stack_dma[512];
+            uint8_t stack_pio[512];
+
+            if (ata_read_sectors(0, 1, stack_dma) != 0 ||
+                ata_pio_read(0, 1, stack_pio) != 0) {
+
+                console_error("ATA self-test: stack comparison read failed");
+                return 0;
+            }
+
+            for (uint32_t i = 0; i < 512; i++) {
+                if (stack_dma[i] != stack_pio[i]) {
+                    console_error(
+                        "ATA self-test: DMA differs from PIO for a "
+                        "stack buffer"
+                    );
+                    terminal_write("  address ");
+                    print_hex32((uint32_t)(uintptr_t)stack_dma);
+                    terminal_write(" first differs at byte ");
+                    terminal_write_u32(i);
+                    terminal_putchar('\n');
+                    return 0;
+                }
+            }
+        }
     }
 
     if (ata_read_sectors((uint32_t)total_sectors, 1, sector) == 0) {

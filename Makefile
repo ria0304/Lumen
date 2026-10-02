@@ -131,6 +131,15 @@ mkfs: $(MKFS)
 # needed; declaring one would just collide with it.
 TEST_DISK = $(BUILD_TEST)/disk.img
 TEST_LOG = $(BUILD_TEST)/boot.log
+
+# The number of self-tests a healthy run must report. Anything less
+# means something skipped silently, which used to read as success: with
+# ATA DMA enabled the filesystem silently failed to mount, six tests
+# skipped, and 'make test' still printed PASS. A skip is only ever
+# acceptable when a test genuinely cannot run (no drive, unformatted
+# disk), and that has to be noticed rather than absorbed, so the
+# expected count is asserted rather than trusting the failure count.
+EXPECTED_SELFTESTS = 27
 .PHONY: test
 test: $(MKFS)
 	@rm -f $(TEST_DISK)
@@ -150,7 +159,14 @@ test: $(MKFS)
 	@echo ""
 	@if grep -q 'SELFTEST-SUMMARY pass=' $(TEST_LOG) && \
 	    ! grep -qE 'SELFTEST [A-Z]+ FAIL' $(TEST_LOG); then \
-	   echo "  TEST    PASS -- $$(grep -o 'pass=[0-9]*' $(TEST_LOG)) failures=0"; \
+	   _got=$$(grep -o 'pass=[0-9]*' $(TEST_LOG) | head -1 | cut -d= -f2); \
+	   if [ "$$_got" -lt $(EXPECTED_SELFTESTS) ]; then \
+	     echo "  TEST    FAIL -- $$_got of $(EXPECTED_SELFTESTS) self-tests ran;"; \
+	     echo "                  the rest skipped. See $(TEST_LOG)"; \
+	     grep -E 'SELFTEST [A-Z]+ SKIP' $(TEST_LOG) || true; \
+	     exit 1; \
+	   fi; \
+	   echo "  TEST    PASS -- pass=$$_got failures=0"; \
 	 else \
 	   echo "  TEST    FAIL -- see $(TEST_LOG)"; exit 1; \
 	 fi
