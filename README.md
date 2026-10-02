@@ -68,7 +68,7 @@ reports FAIL. See [Testing](#testing) and [Known Limitations](#known-limitations
 | Tasks / scheduler | Implemented | Up to `MAX_TASKS` (16), Ring 0 and Ring 3, round-robin, PIT-driven. `fork`, `wait`, block/wake, exit/terminate |
 | Fault isolation | Implemented | A recoverable Ring 3 fault kills that task, not the machine. A Ring 0 fault halts |
 | Syscalls | Implemented (partial) | 25 numbers defined in `syscall.h` (`SYS_GETPID` .. `SYS_RECV`) and dispatched in a `switch`. Some are thin: `SYS_SOCKET` returns a fixed loopback fd |
-| ATA driver | Implemented | PIO and DMA. Used by LumenFS |
+| ATA driver | Implemented | PIO reads/writes, used by LumenFS. DMA is compiled out by default -- see limitations |
 | LumenFS v2 | Implemented | 1 KiB blocks, inodes, directories, direct + indirect blocks, symlinks, hard links, Unix-style permissions and `chmod`/`chown`. v1 images are rejected at mount. See [Storage](#storage) |
 | ELF loader | Implemented | `loader.c` starts a flat binary or an ELF executable from LumenFS as a Ring 3 task |
 | Shell | Implemented | Line editor plus commands for tasks, storage, users, settings, networking, and demos. `help` output lags the real command set |
@@ -249,11 +249,17 @@ identity exists so the permission checks can be tested.
   `make run` message, and image filename (`build/lumen.img`) all use one name and one version
   string from `kernel/version.h`.
 - **`help` lags the shell.** It lists only a subset of the commands the shell accepts.
-- **`run.sh` is an empty file.** Use `make run`.
-- **`tools/mkfs.c` is referenced but missing.** `fs.c` and `.gitignore` mention a host-side `mkfs`
-  tool that is not in the repository.
+- **The shell is keyboard-only.** It reads the PS/2 keyboard, not COM1, so piping commands into a
+  headless QEMU session does not reach the prompt. `make test` drives the kernel through its
+  self-tests instead.
+- **ATA DMA is disabled by default (`LUMEN_ATA_USE_DMA=0`).** The DMA path completes without
+  reporting an error but leaves the destination buffer holding the wrong bytes, which made every
+  filesystem read silently return garbage. Its spin-wait now reports failure so the PIO fallback
+  engages, and the missing PCI Bus Master Enable is set, but the path is still not trusted for
+  correctness. PIO is slower and correct.
 - **Build warnings.** Expected and non-fatal: executable-stack and RWX-segment linker warnings from
-  `tss_load.o`, and a `-Wmisleading-indentation` warning in `nic.c`.
+  `tss_load.o`, plus assorted `-Wmisleading-indentation` and unused-parameter warnings in
+  `shell.c`, `ata.c` and `task.c`.
 
 ---
 
