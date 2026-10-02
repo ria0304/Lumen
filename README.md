@@ -295,9 +295,16 @@ identity exists so the permission checks can be tested.
   now reports failure so the PIO fallback engages, and the missing PCI Bus Master Enable is set, so
   the remaining fault is narrow but real. The ATA self-test now compares DMA against PIO directly
   and fails with the offending address and offset, so enabling DMA is a red build rather than a
-  silent one. Current finding: statically placed buffers match, a stack buffer diverges partway
-  through the sector (observed at 0x0008FB98, first difference at byte 236). PIO is slower and
-  correct.
+  silent one.
+
+  Isolated so far: programmed I/O is correct in every configuration, and
+  DMA into a statically placed buffer matches PIO exactly. DMA into a
+  stack buffer does not (observed at 0x0008FB98, first differing byte
+  236), which is why the filesystem -- whose superblock is a stack local
+  -- cannot mount with DMA enabled. The root cause is not yet identified;
+  the difference is in the destination buffer's location, not its
+  alignment (all four 4-byte alignments behave the same) and not
+  interrupts (disabling them changes nothing). PIO is slower and correct.
 - **Build warnings.** Expected and non-fatal: executable-stack and RWX-segment linker warnings from
   `tss_load.o`, plus assorted `-Wmisleading-indentation` and unused-parameter warnings in
   `shell.c`, `ata.c` and `task.c`.
