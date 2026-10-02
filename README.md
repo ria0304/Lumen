@@ -31,6 +31,12 @@ interactive shell.
 `make test` boots a headless build, captures the serial log, and fails the build if any self-test
 reports FAIL. See [Testing](#testing) and [Known Limitations](#known-limitations).
 
+The suite drives real work rather than just initialisation: a CPL 3 task does
+file I/O through the syscall table and the kernel re-reads what it wrote, two
+Ring 3 programs fault deliberately and must be retired without taking the
+machine down, and `fork()` is checked for real address-space isolation (the
+child overwrites an inherited page; the parent's copy must be untouched).
+
 ---
 
 ## Table of Contents
@@ -75,7 +81,7 @@ reports FAIL. See [Testing](#testing) and [Known Limitations](#known-limitations
 | Users | Implemented | `users.c`; `sudo`, `useradd`, `login` |
 | Settings | Implemented | `settings.c`; persisted to LumenFS |
 | RTC | Implemented | Wall-clock time; `date` |
-| Network | Implemented (basic) | RTL8139 PCI driver, ARP, ICMP echo, `ping`; loopback fallback |
+| Network | Partial | RTL8139 PCI driver, ARP, ICMP echo, `ping`. TX works; the receive ring never yields a frame, so only the loopback path is exercisable. See limitations |
 | GUI | Implemented (minimal) | Text-mode desktop (`gui.c`, `gfx.c`) |
 | Cron / klog | Implemented (basic) | `cron.c` job table, `klog.c` kernel log ring |
 | `pkg` | Stub | In-memory table of up to 16 name/version pairs. Nothing is downloaded, unpacked, or persisted |
@@ -249,6 +255,18 @@ identity exists so the permission checks can be tested.
   `make run` message, and image filename (`build/lumen.img`) all use one name and one version
   string from `kernel/version.h`.
 - **`help` lags the shell.** It lists only a subset of the commands the shell accepts.
+- **The NIC receive path is incomplete.** Transmit works and the
+  RTL8139 is found and initialised, but no frame is ever retrieved from
+  the receive ring under QEMU, so `ping` gets no reply and ARP never
+  resolves. `make test` attaches the NIC on QEMU's user-mode network and
+  exercises the stack for real; it reports the failure and skips rather
+  than passing silently. Two genuine driver bugs were found and fixed
+  on the way -- the 8 KiB receive ring was being backed by a single 4 KiB
+  frame, and ARP frames were sent 42 bytes long, below the 60-byte
+  Ethernet minimum -- but the remaining gap is not yet diagnosed.
+- **`SYS_WAIT` does not block.** It reaps an already-exited child and
+  returns -1 otherwise, so a program that forks must keep yielding and
+  retrying until the timer actually switches to the child.
 - **The shell is keyboard-only.** It reads the PS/2 keyboard, not COM1, so piping commands into a
   headless QEMU session does not reach the prompt. `make test` drives the kernel through its
   self-tests instead.

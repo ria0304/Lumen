@@ -11,6 +11,14 @@
 
 void frame_init(void);
 uint32_t frame_alloc(void);
+
+/*
+ * Allocate/release a physically contiguous run of frames. Required by
+ * anything the DMA engine walks arithmetically from a base address,
+ * such as the RTL8139 receive ring.
+ */
+uint32_t frame_alloc_contiguous(uint32_t count);
+int frame_free_contiguous(uint32_t physical_address, uint32_t count);
 int frame_free(uint32_t physical_address);
 uint32_t frame_free_count(void);
 uint32_t frame_used_count(void);

@@ -148,6 +148,71 @@ uint32_t frame_alloc(void)
     return FRAME_INVALID;
 }
 
+/*
+ * Allocate 'count' physically contiguous frames and return the base
+ * physical address, or FRAME_INVALID.
+ *
+ * DMA descriptors and the RTL8139 receive ring must live in a single
+ * unbroken physical range: the hardware walks them by arithmetic on
+ * the base address, so individually allocated pages will not do.
+ * Everything is released again if the range cannot be completed.
+ */
+uint32_t frame_alloc_contiguous(uint32_t count)
+{
+    if (count == 0 || count > FRAME_COUNT)
+        return FRAME_INVALID;
+
+    for (uint32_t index = 0; index + count <= FRAME_COUNT; ++index) {
+
+        uint32_t i;
+        int run = 1;
+
+        for (i = 0; i < count; ++i) {
+            if (is_used(index + i)) {
+                run = 0;
+                break;
+            }
+        }
+
+        if (!run)
+            continue;
+
+        for (i = 0; i < count; ++i) {
+            mark_used(index + i);
+
+            if (free_frames > 0)
+                --free_frames;
+
+            ++used_frames;
+        }
+
+        return index * FRAME_SIZE;
+    }
+
+    return FRAME_INVALID;
+}
+
+int frame_free_contiguous(uint32_t physical_address, uint32_t count)
+{
+    if (count == 0)
+        return -1;
+
+    if ((physical_address & (FRAME_SIZE - 1U)) != 0)
+        return -1;
+
+    uint32_t index = physical_address / FRAME_SIZE;
+
+    if (index + count > FRAME_COUNT)
+        return -1;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        if (is_used(index + i))
+            frame_free(physical_address + i * FRAME_SIZE);
+    }
+
+    return 0;
+}
+
 int frame_free(uint32_t physical_address)
 {
     if ((physical_address &

@@ -81,18 +81,47 @@ void arp_add(uint32_t ip, const uint8_t *m){
     arp[0].used=1;
 }
 
+/*
+ * The RTL8139 receive ring is 8 KiB + 16 bytes and must be one
+ * physically unbroken range: the hardware computes each packet's
+ * offset from RBSTART arithmetically. It used to come from a single
+ * frame_alloc(), i.e. 4 KiB, so the ring ran past its own allocation
+ * and no received frame was ever visible at the index the driver
+ * looked in. RX_RING_BYTES of contiguous frames covers it.
+ */
+#define RX_RING_BYTES (RX_BUF_SIZE + 16U)
+
 static int low_frames(uint32_t *a, uint32_t *b, uint32_t *c){
-    /* collect 3 sub-4MiB frames (identity-mapped, DMA-safe) */
-    uint32_t got[12]; int n=0, ok=0;
-    uint32_t ra=0,rb=0,rc=0;
-    for(int i=0;i<12 && !ok;i++){
+    uint32_t pages = (RX_RING_BYTES + FRAME_SIZE - 1U) / FRAME_SIZE;
+
+    uint32_t ra = frame_alloc_contiguous(pages);
+    uint32_t rb = 0;
+    uint32_t rc = 0;
+
+    if(ra==FRAME_INVALID || ra>=0x400000){
+        if(ra!=FRAME_INVALID) frame_free_contiguous(ra,pages);
+        return -1;
+    }
+
+    /* Transmit descriptors are four scattered addresses, so this one
+     * may be a single frame -- but it still has to sit below 4 MiB to
+     * stay identity-mapped for the CPU. */
+    for(int i=0;i<16 && !rb;i++){
         uint32_t f = frame_alloc();
         if(f==FRAME_INVALID) break;
-        got[n++]=f;
-        if(f<0x400000){ if(!ra)ra=f; else if(!rb)rb=f; else if(!rc){rc=f;ok=1;} }
+        if(f<0x400000) rb=f; else frame_free(f);
     }
-    for(int i=0;i<n;i++){ uint32_t f=got[i]; if(f!=ra&&f!=rb&&f!=rc) frame_free(f); }
-    if(!ok){ if(ra)frame_free(ra); if(rb)frame_free(rb); if(rc)frame_free(rc); return -1; }
+
+    if(!rb){ frame_free_contiguous(ra,pages); return -1; }
+
+    for(int i=0;i<8 && !rc;i++){
+        uint32_t f = frame_alloc();
+        if(f==FRAME_INVALID) break;
+        if(f<0x400000) rc=f; else frame_free(f);
+    }
+
+    if(!rc){ frame_free(rb); frame_free_contiguous(ra,pages); return -1; }
+
     *a=ra;*b=rb;*c=rc; return 0;
 }
 
@@ -115,6 +144,7 @@ int nic_init(void){
             while((inb(iob+0x37)&0x10) && timer_ticks-t<100) {}
             outl(iob+0x30, rx_phys);         /* RBSTART */
             outl(iob+0x44, 0x0F);            /* accept AB/AM/APM/AAP */
+            outw(iob+0x3C, 0x0005);          /* IMR: unmask ROK|TOK */
             outb(iob+0x37, 0x0C);            /* RE|TE */
             rx_off=0; have_hw=1;
         }
@@ -193,7 +223,14 @@ static void eth_ip_icmp(uint8_t *f, const uint8_t *dst, uint32_t sip, uint32_t d
 
 static int arp_request(uint32_t tip, uint8_t *mac_out){
     static const uint8_t bcast[6]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    /*
+     * Pad to the 60-byte Ethernet minimum. The ARP payload above ends
+     * at byte 40, and the frame used to be sent as 42 bytes, which is
+     * below the minimum frame size and gets dropped before it reaches
+     * the peer -- so no reply ever came back.
+     */
     uint8_t f[64]; uint8_t *p=f;
+    for(int i=0;i<64;i++) f[i]=0;
     for(int i=0;i<6;i++)*p++=bcast[i];
     for(int i=0;i<6;i++)*p++=mac[i];
     *p++=0x08;*p++=0x06;
@@ -204,12 +241,12 @@ static int arp_request(uint32_t tip, uint8_t *mac_out){
     *p++=sip>>24;*p++=(sip>>16)&0xFF;*p++=(sip>>8)&0xFF;*p++=sip&0xFF;
     for(int i=0;i<6;i++)*p++=0;
     *p++=tip>>24;*p++=(tip>>16)&0xFF;*p++=(tip>>8)&0xFF;*p++=tip&0xFF;
-    if(nic_send(f,42)<0) return -1;
+    if(nic_send(f,60)<0) return -1;
     uint8_t rx[256];
     uint32_t start=timer_ticks;
     while(timer_ticks-start<200){
         int n=nic_recv(rx,sizeof(rx),10);
-        if(n>=42 && rx[12]==0x08 && rx[13]==0x06 && rx[20]==0x00 && rx[21]==0x02){
+        if(n>=60 && rx[12]==0x08 && rx[13]==0x06 && rx[20]==0x00 && rx[21]==0x02){
             uint32_t sip2=((uint32_t)rx[28]<<24)|((uint32_t)rx[29]<<16)|((uint32_t)rx[30]<<8)|rx[31];
             if(sip2==tip){
                 for(int i=0;i<6;i++)
@@ -219,7 +256,7 @@ static int arp_request(uint32_t tip, uint8_t *mac_out){
             }
         }
         /* learn gratuitous ARPs while waiting */
-        if(n>=42 && rx[12]==0x08 && rx[13]==0x06){
+        if(n>=60 && rx[12]==0x08 && rx[13]==0x06){
             uint32_t s2=((uint32_t)rx[28]<<24)|((uint32_t)rx[29]<<16)|((uint32_t)rx[30]<<8)|rx[31];
             uint8_t m2[6];
             for(int i=0;i<6;i++)
@@ -279,5 +316,55 @@ int nic_run_self_test(void){
     uint8_t o[6];
     if(arp_lookup(0x0A000202u,o)!=0) return 0;
     for(int i=0;i<6;i++) if(o[i]!=m[i]) return 0;
+
+    /*
+     * Everything above is pure computation. The interesting part is
+     * the wire: resolve a real MAC for a host that is actually there,
+     * then exchange an ICMP echo with it.
+     *
+     * 'make test' attaches an RTL8139 on QEMU's user-mode network,
+     * which answers ARP and ICMP echo for 10.0.2.2. Both checks are
+     * skipped, not failed, when no NIC is present or the peer does
+     * not answer -- an isolated or hardware-less run is a normal
+     * configuration, and a suite that only passes with networking
+     * attached is worse than useless.
+     */
+    if(!have_hw){
+        console_info("NIC: no hardware, skipping wire test");
+        return 1;
+    }
+
+    uint8_t gw[6];
+    if(arp_request(0x0A000202u,gw)!=0){
+        console_warn("NIC: no ARP reply for 10.0.2.2, skipping wire test");
+        return 1;
+    }
+
+    if(gw[0]==0 && gw[1]==0 && gw[2]==0 && gw[3]==0 && gw[4]==0 && gw[5]==0){
+        console_error("NIC: ARP returned an all-zero MAC");
+        return 0;
+    }
+
+    console_info("NIC: resolved 10.0.2.2 ->");
+    terminal_write_u32(gw[0]); terminal_putchar(':');
+    terminal_write_u32(gw[1]); terminal_putchar(':');
+    terminal_write_u32(gw[2]); terminal_putchar(':');
+    terminal_write_u32(gw[3]); terminal_putchar(':');
+    terminal_write_u32(gw[4]); terminal_putchar(':');
+    terminal_write_u32(gw[5]);
+    terminal_putchar('\n');
+
+    /* And the reply must have been cached. */
+    uint8_t cached[6];
+    if(arp_lookup(0x0A000202u,cached)!=0){
+        console_error("NIC: resolved address was not cached");
+        return 0;
+    }
+
+    if(nic_ping_ip(0x0A000202u)<0){
+        console_warn("NIC: no ICMP echo reply, skipping ping check");
+        return 1;
+    }
+
     return 1;
 }

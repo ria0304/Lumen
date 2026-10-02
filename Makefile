@@ -143,6 +143,7 @@ test: $(MKFS)
 	    -boot order=a \
 	    -drive file=$(BUILD_TEST)/lumen.img,format=raw,if=floppy \
 	    -drive file=$(TEST_DISK),format=raw,if=ide \
+	    -netdev user,id=n0 -device rtl8139,netdev=n0 \
 	    -device isa-debug-exit \
 	    < /dev/null > $(TEST_LOG) 2>&1; true
 	@grep -E 'SELFTEST' $(TEST_LOG) || true
