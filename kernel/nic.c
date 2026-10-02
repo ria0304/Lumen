@@ -31,6 +31,26 @@ static uint16_t iob = 0;
 static uint8_t mac[6];
 static uint32_t rx_phys = 0, tx_phys = 0;
 static uint8_t *rx_buf = 0, *tx_buf = 0;
+
+/*
+ * TX descriptor ring.
+ *
+ * Register 0x10 is TxDescriptorStart: the physical base of the
+ * descriptor array, not a length. Each descriptor is 32 bytes:
+ *   +0  flags and length in the low 16 bits
+ *   +4  user id
+ *   +8  physical address of the packet
+ *   +12 length in bytes
+ *
+ * Writing a length to 0x10 told the device its descriptors lived at
+ * physical address 60, so it read them out of low memory and emitted
+ * nothing. Bit 0 must be set for the register write to be honoured at
+ * all; the base is taken as value & 0xFFFFFFFC.
+ */
+#define TX_DESC_COUNT 4U
+#define TX_DESC_BYTES (TX_DESC_COUNT * 32U)
+static uint32_t tx_desc_phys = 0;
+static uint32_t *tx_desc = 0;
 static uint16_t rx_off = 0;
 static int tx_idx = 0;
 static uint32_t txc = 0, rxc = 0;
@@ -91,9 +111,11 @@ void arp_add(uint32_t ip, const uint8_t *m){
  */
 #define RX_RING_BYTES (RX_BUF_SIZE + 16U)
 
-static int low_frames(uint32_t *a, uint32_t *b, uint32_t *c){
-    uint32_t pages = (RX_RING_BYTES + FRAME_SIZE - 1U) / FRAME_SIZE;
+static int low_frames(uint32_t *a, uint32_t *b, uint32_t *c,
+                       uint32_t *pages_out){
+    *pages_out = (RX_RING_BYTES + FRAME_SIZE - 1U) / FRAME_SIZE;
 
+    uint32_t pages = *pages_out;
     uint32_t ra = frame_alloc_contiguous(pages);
     uint32_t rb = 0;
     uint32_t rc = 0;
@@ -135,8 +157,27 @@ int nic_init(void){
             if(iob==0) continue;
             for(int k=0;k<6;k++) mac[k]=inb(iob+k);
             uint32_t ra,rb,rc;
-            if(low_frames(&ra,&rb,&rc)!=0) continue; /* no DMA mem: skip */
-            rx_phys=ra; tx_phys=rb; frame_free(rc);
+            uint32_t rx_pages = 0;
+            if(low_frames(&ra,&rb,&rc,&rx_pages)!=0) continue; /* no DMA mem: skip */
+            rx_phys=ra; tx_phys=rb;
+
+            tx_desc_phys = frame_alloc_contiguous(
+                (TX_DESC_BYTES + FRAME_SIZE - 1U) / FRAME_SIZE);
+
+            if(tx_desc_phys!=FRAME_INVALID && tx_desc_phys<0x400000){
+                tx_desc = (uint32_t *)tx_desc_phys;
+                for(uint32_t z=0; z<TX_DESC_BYTES/4; z++) tx_desc[z]=0;
+            } else {
+                tx_desc = 0;
+                if(tx_desc_phys!=FRAME_INVALID)
+                    frame_free_contiguous(tx_desc_phys,
+                        (TX_DESC_BYTES + FRAME_SIZE - 1U) / FRAME_SIZE);
+                frame_free_contiguous(ra, rx_pages);
+                frame_free(rb);
+                frame_free(rc);
+                continue;
+            }
+
             rx_buf=(uint8_t*)rx_phys; tx_buf=(uint8_t*)tx_phys;
             outb(iob+0x52, 0x00);            /* power on */
             outb(iob+0x37, 0x10);            /* reset */
@@ -145,6 +186,7 @@ int nic_init(void){
             outl(iob+0x30, rx_phys);         /* RBSTART */
             outl(iob+0x44, 0x0F);            /* accept AB/AM/APM/AAP */
             outw(iob+0x3C, 0x0005);          /* IMR: unmask ROK|TOK */
+            outl(iob+0x10, tx_desc_phys | 1U); /* TxDescriptorStart */
             outb(iob+0x37, 0x0C);            /* RE|TE */
             rx_off=0; have_hw=1;
         }
@@ -158,19 +200,31 @@ uint32_t nic_tx_count(void){return txc;}
 uint32_t nic_rx_count(void){return rxc;}
 
 int nic_send(const void *frame, uint32_t len){
-    if(!have_hw || !frame || len<14 || len>1536) return -1;
+    if(!have_hw || !tx_desc || !frame || len<14 || len>1536) return -1;
+
     const uint8_t *p=(const uint8_t*)frame;
     for(uint32_t i=0;i<len;i++) tx_buf[i]=p[i];
+
     int d = tx_idx; tx_idx=(tx_idx+1)&3;
+
     /*
-     * TSADn holds the packet address; 0x10 is TxDescriptorStart, the
-     * base of the descriptor array -- it is not a length field. The
-     * descriptor itself supplies the length and the packet pointer,
-     * and filling it is not enough: the ring is only scanned when the
-     * Tx bit of the Tx Command register (0x50) is written.
+     * Fill descriptor d: length in the low 16 bits, the packet's
+     * physical address in TDADDR (+8). OWNER stays clear, which is how
+     * the device is told the entry is ready.
      */
+    uint32_t *desc = tx_desc + (uint32_t)d * 8U;
+    desc[0] = (len & 0xFFFFU);
+    desc[1] = 0;
+    desc[2] = tx_phys;
+    desc[3] = len;
+
+    /* TSADn mirrors TDADDR; keep both in step. */
     outl((uint16_t)(iob+0x20+d*4), tx_phys);
-    outl((uint16_t)(iob+0x50), 0x01);
+
+    /* Filling a descriptor is not enough: the ring is only scanned
+     * when the Tx bit of the Tx Command register is written. */
+    outb((uint16_t)(iob+0x50), 0x01);
+
     uint32_t t=timer_ticks;
     while(timer_ticks-t<50){
         uint16_t isr=inw(iob+0x3E);
