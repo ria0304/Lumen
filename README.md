@@ -293,18 +293,27 @@ identity exists so the permission checks can be tested.
   programmed I/O: with DMA on, the superblock comes back as zeros, the filesystem cannot mount,
   and the controller is left such that later PIO reads return the same wrong bytes. Its spin-wait
   now reports failure so the PIO fallback engages, and the missing PCI Bus Master Enable is set, so
-  the remaining fault is narrow but real. The ATA self-test now compares DMA against PIO directly
-  and fails with the offending address and offset, so enabling DMA is a red build rather than a
-  silent one.
+  Two real defects were found and fixed along the way:
 
-  Isolated so far: programmed I/O is correct in every configuration, and
-  DMA into a statically placed buffer matches PIO exactly. DMA into a
-  stack buffer does not (observed at 0x0008FB98, first differing byte
-  236), which is why the filesystem -- whose superblock is a stack local
-  -- cannot mount with DMA enabled. The root cause is not yet identified;
-  the difference is in the destination buffer's location, not its
-  alignment (all four 4-byte alignments behave the same) and not
-  interrupts (disabling them changes nothing). PIO is slower and correct.
+  - the bus master IDE registers were placed at `0xD000`, which is a
+    memory address, not an I/O port. They belong at `0xC0` (primary
+    channel) / `0xD0` (secondary). Every write went to an unmapped port,
+    so the engine never ran, while reads returned `0xFF` -- and `0xFF`
+    has the interrupt bit set, so the completion loop reported instant
+    success on every transfer without moving a byte. The drive was left
+    mid-command, which is why even later programmed reads returned
+    nothing;
+  - the completion loop tested the interrupt bit *before* the error bit.
+    A failed transfer sets both, so every failure was reported as a
+    success.
+
+  What remains: with the ports corrected, the bus master now responds
+  and reports a transfer error, so the error is visible and the
+  filesystem falls back to PIO rather than being fed garbage -- but DMA
+  still does not complete. Programmed I/O is correct in every
+  configuration. The self-test compares DMA against PIO directly and
+  fails with the offending address and offset, so enabling DMA is a red
+  build rather than a silent one. PIO is slower and correct.
 - **Build warnings.** Expected and non-fatal: executable-stack and RWX-segment linker warnings from
   `tss_load.o`, plus assorted `-Wmisleading-indentation` and unused-parameter warnings in
   `shell.c`, `ata.c` and `task.c`.

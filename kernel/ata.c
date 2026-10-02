@@ -54,10 +54,29 @@ static void print_hex32(uint32_t value);
 #define ATA2_COMMAND    (ATA2_IO_BASE + 7)
 #define ATA2_CONTROL    0x376
 
-/* DMA registers (bus master IDE) */
-#define ATA_BM_BASE     0xD000
-#define ATA_BM_COMMAND  (ATA_BM_BASE + 0)
+/*
+ * Bus master IDE (PIIX) registers.
+ *
+ * These are I/O ports on the IDE controller, not memory: 0xC0 for the
+ * primary channel and 0xD0 for the secondary. They used to be placed
+ * at 0xD000, which is not a port at all.
+ *
+ * Every consequence of that was silent and terrible. Writing START to
+ * an unmapped port did nothing, so the bus master engine never ran,
+ * while reading the status register returned 0xFF -- and 0xFF has the
+ * interrupt bit set, so the completion loop saw "finished" instantly
+ * and reported success. The destination buffer was never written.
+ *
+ * Worse, the drive had already been issued READ DMA and was left
+ * waiting for a transfer that would never come, so every subsequent
+ * read -- including plain programmed I/O -- returned nothing either.
+ *
+ * Offsets, per the PIIX register map: status is readable at +0 and +2,
+ * the command shares +2, and the PRDT address is at +4.
+ */
+#define ATA_BM_BASE     0xC0
 #define ATA_BM_STATUS   (ATA_BM_BASE + 2)
+#define ATA_BM_COMMAND  (ATA_BM_BASE + 2)
 #define ATA_BM_PRDT     (ATA_BM_BASE + 4)
 
 #define ATA_CMD_READ         0x20
@@ -708,7 +727,7 @@ static int ata_dma_read(uint32_t lba, uint8_t count, void *buffer)
     /* Issue DMA read command */
     outb(ATA_COMMAND, ATA_CMD_READ_DMA);
 
-    /* Start DMA transfer */
+    /* Start the bus master after the drive has been told to fetch. */
     outb(ATA_BM_COMMAND, ATA_BM_CMD_START);
 
     /* Wait for completion. A spin timeout means the transfer never
@@ -720,12 +739,16 @@ static int ata_dma_read(uint32_t lba, uint8_t count, void *buffer)
 
     for (uint32_t spins = 0; spins < 1000000U; spins++) {
         uint8_t status = inb(ATA_BM_STATUS);
-        if (status & ATA_BM_STATUS_INTR) {
-            completed = 1;
-            break;
-        }
+
+        /* Error first. A failed transfer sets both bits, and testing
+         * the interrupt first reported success on every one of them. */
         if (status & ATA_BM_STATUS_ERR) {
             console_error("DMA: transfer error");
+            break;
+        }
+
+        if (status & ATA_BM_STATUS_INTR) {
+            completed = 1;
             break;
         }
     }
